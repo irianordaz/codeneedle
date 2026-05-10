@@ -834,6 +834,8 @@ def parse_results_from_files(
         passed = sum(1 for r in results if r.get("passed"))
         hallucinated = sum(r.get("hallucinated", 0) for r in results)
         bonus = sum(r.get("bonus_matched", 0) for r in results)
+        primary_matched = sum(r.get("primary_matched", 0) for r in results)
+        runtime = sum(r.get("latency_s", 0.0) for r in results)
 
         # JSON dump files are named {corpus}__{model-stem}.json.
         # Extract the model-stem (part after '__') and reconstruct
@@ -850,6 +852,8 @@ def parse_results_from_files(
                 "passed": passed,
                 "hallucinated": hallucinated,
                 "bonus": bonus,
+                "primary_matched": primary_matched,
+                "runtime": runtime,
                 "error": None,
             }
         )
@@ -901,12 +905,13 @@ def _build_table_data(results: list[dict]) -> dict:
         key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
     )
 
-    header = ["Model", "Pass", "Hallucinations", "Bonus", "Runtime (s)"]
+    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Runtime (s)"]
     rows: list[list[str]] = []
 
     total_passed = 0
     total_hallucinated = 0
     total_bonus = 0
+    total_primary = 0
     total_runtime = 0.0
 
     for r in sorted_results:
@@ -915,20 +920,22 @@ def _build_table_data(results: list[dict]) -> dict:
         passed = r.get("passed", 0)
         hallucinated = r.get("hallucinated", 0)
         bonus = r.get("bonus", 0)
+        primary = r.get("primary_matched", 0)
         runtime = r.get("runtime", 0.0)
         error = r.get("error")
 
         if error:
             model = f"{model} (ERROR: {error})"
 
-        rows.append([model, str(passed), str(hallucinated), str(bonus), f"{runtime:.1f}"])
+        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), f"{runtime:.1f}"])
 
         total_passed += passed
         total_hallucinated += hallucinated
         total_bonus += bonus
+        total_primary += primary
         total_runtime += runtime
 
-    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), f"{total_runtime:.1f}"]
+    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), f"{total_runtime:.1f}"]
     return {
         "header": header,
         "rows": rows,
@@ -1124,6 +1131,25 @@ def _build_full_html(
             background: #f8f9fa;
             border-top: 2px solid #1a73e8;
         }}
+        thead th {{
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+        }}
+        thead th:hover {{
+            background: #e8f4fd;
+        }}
+        thead th .sort-arrow {{
+            display: inline-block;
+            margin-left: 6px;
+            font-size: 10px;
+            opacity: 0.4;
+            transition: opacity 0.2s;
+        }}
+        thead th.active-sort .sort-arrow {{
+            opacity: 1;
+            color: #1a73e8;
+        }}
     </style>
 </head>
 <body>
@@ -1141,6 +1167,76 @@ def _build_full_html(
             </tbody><!-- BENCHMARK_ROWS_END -->
         </table>
     </div>
+    <script>
+    (function() {{
+        let sortCol = -1;
+        let sortAsc = true;
+
+        function parseNumeric(val) {{
+            const cleaned = val.replace(/,/g, '').replace(/\\(.*\\)/, '').trim();
+            const num = parseFloat(cleaned);
+            return isNaN(num) ? null : num;
+        }}
+
+        function sortTable(colIndex) {{
+            const tbody = document.getElementById("benchmark-rows");
+            if (!tbody) return;
+
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const totalRow = rows.pop();
+
+            if (colIndex === sortCol) {{
+                sortAsc = !sortAsc;
+            }} else {{
+                sortCol = colIndex;
+                sortAsc = true;
+            }}
+
+            rows.sort((a, b) => {{
+                const cellsA = a.querySelectorAll("td");
+                const cellsB = b.querySelectorAll("td");
+                if (colIndex >= cellsA.length || colIndex >= cellsB.length) return 0;
+
+                const valA = cellsA[colIndex].textContent.trim();
+                const valB = cellsB[colIndex].textContent.trim();
+
+                const numA = parseNumeric(valA);
+                const numB = parseNumeric(valB);
+
+                if (numA !== null && numB !== null) {{
+                    return sortAsc ? numA - numB : numB - numA;
+                }}
+
+                const comparison = valA.localeCompare(valB);
+                return sortAsc ? comparison : -comparison;
+            }});
+
+            tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
+            tbody.appendChild(totalRow);
+
+            document.querySelectorAll("thead th").forEach((th, i) => {{
+                th.classList.remove("active-sort");
+                const arrow = th.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = " \\u25B2\\u25BC";
+            }});
+
+            const activeTh = document.querySelectorAll("thead th")[colIndex];
+            if (activeTh) {{
+                activeTh.classList.add("active-sort");
+                const arrow = activeTh.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = sortAsc ? "\\u25B2" : "\\u25BC";
+            }}
+        }}
+
+        document.querySelectorAll("thead th").forEach((th, i) => {{
+            th.addEventListener("click", () => sortTable(i));
+            const arrow = document.createElement("span");
+            arrow.className = "sort-arrow";
+            arrow.textContent = " \\u25B2\\u25BC";
+            th.appendChild(arrow);
+        }});
+    }})();
+    </script>
 </body>
 </html>"""
     return html_content
@@ -1196,7 +1292,7 @@ def generate_html_table(
     header_cells = []
     for i, h in enumerate(header):
         width = col_widths_px[i]
-        header_cells.append(f'<th style="width: {width}px;">{h}</th>')
+        header_cells.append(f'<th data-column="{i}" style="width: {width}px;">{h}</th>')
 
     new_tbody = "\n".join(html_rows)
     new_total = f"\n{html_total}\n"
@@ -1211,6 +1307,17 @@ def generate_html_table(
         end_idx = existing.find(marker_end)
 
         if start_idx != -1 and end_idx != -1:
+            thead_start = existing.find("<thead>")
+            thead_end = existing.find("</thead>")
+            if thead_start != -1 and thead_end != -1:
+                old_thead = existing[thead_start: thead_end + len("</thead>")]
+                new_thead = "<thead>" + "".join(header_cells) + "</thead>"
+                existing = existing.replace(old_thead, new_thead)
+
+            # Remove any existing sorting script and body tag
+            existing = existing.replace("</script>", "", 1)
+            existing = existing.replace("</body>", "", 1)
+
             before = existing[: start_idx + len(marker_start)]
             after = existing[end_idx:]
             html_content = (
@@ -1218,6 +1325,83 @@ def generate_html_table(
                 + new_tbody
                 + new_total
                 + after
+            )
+            # Append the sorting script at the end of the body
+            html_content = html_content.rstrip() + "\n    </body>\n</html>"
+            html_content = html_content.replace(
+                "</html>",
+                '''    <script>
+    (function() {
+        let sortCol = -1;
+        let sortAsc = true;
+
+        function parseNumeric(val) {
+            const cleaned = val.replace(/,/g, '').replace(/\\(.*\\)/, '').trim();
+            const num = parseFloat(cleaned);
+            return isNaN(num) ? null : num;
+        }
+
+        function sortTable(colIndex) {
+            const tbody = document.getElementById("benchmark-rows");
+            if (!tbody) return;
+
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            const totalRow = rows.pop();
+
+            if (colIndex === sortCol) {
+                sortAsc = !sortAsc;
+            } else {
+                sortCol = colIndex;
+                sortAsc = true;
+            }
+
+            rows.sort((a, b) => {
+                const cellsA = a.querySelectorAll("td");
+                const cellsB = b.querySelectorAll("td");
+                if (colIndex >= cellsA.length || colIndex >= cellsB.length) return 0;
+
+                const valA = cellsA[colIndex].textContent.trim();
+                const valB = cellsB[colIndex].textContent.trim();
+
+                const numA = parseNumeric(valA);
+                const numB = parseNumeric(valB);
+
+                if (numA !== null && numB !== null) {
+                    return sortAsc ? numA - numB : numB - numA;
+                }
+
+                const comparison = valA.localeCompare(valB);
+                return sortAsc ? comparison : -comparison;
+            });
+
+            tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
+            tbody.appendChild(totalRow);
+
+            document.querySelectorAll("thead th").forEach((th, i) => {
+                th.classList.remove("active-sort");
+                const arrow = th.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = " \\u25B2\\u25BC";
+            });
+
+            const activeTh = document.querySelectorAll("thead th")[colIndex];
+            if (activeTh) {
+                activeTh.classList.add("active-sort");
+                const arrow = activeTh.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = sortAsc ? "\\u25B2" : "\\u25BC";
+            }
+        }
+
+        document.querySelectorAll("thead th").forEach((th, i) => {
+            th.addEventListener("click", () => sortTable(i));
+            const arrow = document.createElement("span");
+            arrow.className = "sort-arrow";
+            arrow.textContent = " \\u25B2\\u25BC";
+            th.appendChild(arrow);
+        });
+    }})();
+</script>
+</html>''',
+                1,
             )
         else:
             html_content = _build_full_html(
