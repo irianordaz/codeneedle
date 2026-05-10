@@ -1,0 +1,12 @@
+# Qwen3.6 35B A3B — reasoning-on-by-default. Ignores `/no_think` AND
+# `reasoning_effort`; the only working bypass is prefilling an empty
+# `<think></think>` assistant turn, which `prefill_no_think` does. With CoT
+# skipped, max_tokens=65000 is plenty.
+
+name              = "qwen3.6-35b-a3b"
+base_url          = "http://localhost:1234"
+temperature       = 0.0
+max_tokens        = 65000
+timeout           = 600.0
+prefill_no_think  = true    # the only thing that works on this model
+suppress_thinking = true    # appended anyway; harmless when ignored
