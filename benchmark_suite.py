@@ -26,7 +26,7 @@ from pathlib import Path
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_TOKENS = 65000
+DEFAULT_MAX_TOKENS = 32768
 DEFAULT_CORPORA_DIR = Path("configs/corpora")
 DEFAULT_USER_MODELS_DIR = Path("configs/models/user")
 DEFAULT_TEMPLATE_DIR = Path("configs/models")
@@ -191,7 +191,7 @@ def create_minimal_toml(
         f'base_url = "http://localhost:1234"\n'
         f"temperature = 0.0\n"
         f"max_tokens = {max_tokens}\n"
-        f"timeout = 600.0\n"
+        f"timeout = 10000.0\n"
         f"suppress_thinking = true\n"
     )
 
@@ -494,6 +494,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Print what would happen without executing benchmarks.",
+    )
+    parser.add_argument(
+        "--clean-run",
+        action="store_true",
+        help="Delete existing results tables before generating new ones.",
     )
     parser.add_argument(
         "--save-table",
@@ -852,21 +857,50 @@ def parse_results_from_files(
     return parsed_results
 
 
-def generate_markdown_table(
-    results: list[dict],
-    save_path: Path,
-    corpus: str = "",
-) -> None:
-    """Generate a Markdown table with improved formatting.
+def merge_results(
+    existing: list[dict],
+    new: list[dict],
+) -> list[dict]:
+    """Merge new benchmark results with existing results.
 
-    Uses equal-width columns and one row per model for readability.
+    Matches results by `config_path` key so that results from
+    different runs (different models) can be combined into a
+    single table.
+
+    Existing (parsed) results take priority over new (placeholder)
+    results because the new results from run_benchmarks have
+    passed/hallucinated/bonus = 0 as placeholders that need to
+    be filled in by the parsed JSON dump data.
+
+    Args:
+        existing: Previously parsed results (from parse_results_from_files).
+        new: Newly benchmarked results (from run_benchmarks).
+
+    Returns:
+        Combined list of results, with existing data overwriting
+        entries that share the same config_path.
     """
+    # Index new results by config_path for O(1) lookup
+    new_map: dict[str, dict] = {}
+    for r in new:
+        cp = str(r.get("config_path", ""))
+        new_map[cp] = r
+
+    # Overwrite with existing (parsed) data — existing takes priority
+    for r in existing:
+        cp = str(r.get("config_path", ""))
+        new_map[cp] = r
+
+    return list(new_map.values())
+
+
+def _build_table_data(results: list[dict]) -> dict:
+    """Build shared table data from benchmark results."""
     sorted_results = sorted(
         results,
         key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
     )
 
-    # Compute column widths from data
     header = ["Model", "Pass", "Hallucinations", "Bonus", "Runtime (s)"]
     rows: list[list[str]] = []
 
@@ -894,53 +928,308 @@ def generate_markdown_table(
         total_bonus += bonus
         total_runtime += runtime
 
+    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), f"{total_runtime:.1f}"]
+    return {
+        "header": header,
+        "rows": rows,
+        "totals": totals,
+        "corpus": "",
+    }
+
+
+def generate_markdown_table(
+    results: list[dict],
+    save_path: Path,
+    corpus: str = "",
+) -> None:
+    """Generate a Markdown table with improved formatting.
+
+    Appends new rows between markers so previous runs are preserved.
+    Uses equal-width columns and one row per model for readability.
+    """
+    data = _build_table_data(results)
+    data["corpus"] = corpus
+
+    header = data["header"]
+    rows = data["rows"]
+    totals = data["totals"]
+
     # Compute max width per column
     col_widths = [len(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
             col_widths[i] = max(col_widths[i], len(cell))
-    # Width for totals row
-    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), f"{total_runtime:.1f}"]
     for i, cell in enumerate(totals):
         col_widths[i] = max(col_widths[i], len(cell))
 
-    def _fmt(is_header: bool) -> str:
+    def _fmt_row(labels: list[str], bold: bool = False) -> str:
         parts = []
-        for i, label in enumerate(is_header and header or totals):
-            if is_header:
-                pad = col_widths[i] - len(label)
-                parts.append((" " + label + " " + " " * pad))
+        for i, label in enumerate(labels):
+            pad = col_widths[i] - len(label)
+            if bold:
+                parts.append((" **" + label + "**" + " " * pad))
             else:
-                pad = col_widths[i] - len(label)
-                parts.append(("-" * (2 + pad)))
+                parts.append((" " + label + " " + " " * pad))
         return "|" + "|".join(parts) + "|"
 
-    lines = [
+    def _fmt_separator() -> str:
+        parts = []
+        for i in range(len(header)):
+            pad = col_widths[i] - len(header[i])
+            parts.append(("-" * (2 + pad)))
+        return "|" + "|".join(parts) + "|"
+
+    new_block_lines = [
         f"<!-- Corpus: {corpus} -->" if corpus else "",
         "",
-        _fmt(True),
-        _fmt(False),
+        _fmt_row(header),
+        _fmt_separator(),
     ]
 
     for row in rows:
-        parts = []
-        for i, cell in enumerate(row):
-            pad = col_widths[i] - len(cell)
-            parts.append((" " + cell + " " + " " * pad))
-        lines.append("|" + "|".join(parts) + "|")
+        new_block_lines.append(_fmt_row(row))
 
-    # Totals row
-    parts = []
-    for i, cell in enumerate(totals):
-        pad = col_widths[i] - len(cell)
-        parts.append((" **" + cell + "**" + " " * pad))
-    lines.append("|" + "|".join(parts) + "|")
-    lines.append("")
+    new_block_lines.append(_fmt_row(totals, bold=True))
+    new_block_lines.append("")
 
-    table_content = "\n".join(lines)
+    new_block = "\n".join(new_block_lines)
+
     save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if save_path.exists():
+        existing = save_path.read_text()
+        marker_start = "<!-- BENCHMARK_ROWS_START -->"
+        marker_end = "<!-- BENCHMARK_ROWS_END -->"
+        start_idx = existing.find(marker_start)
+        end_idx = existing.find(marker_end)
+
+        if start_idx != -1 and end_idx != -1:
+            before = existing[: start_idx + len(marker_start)]
+            after = existing[end_idx:]
+            table_content = before + new_block + after
+        else:
+            # No markers yet — build complete table with markers
+            header_line = _fmt_row(header)
+            separator_line = _fmt_separator()
+            table_content = (
+                f"<!-- Corpus: {corpus} -->"
+                + "\n\n"
+                + header_line
+                + "\n"
+                + separator_line
+                + "\n"
+                + "<!-- BENCHMARK_ROWS_START -->"
+                + "\n"
+                + new_block
+                + "\n"
+                + "<!-- BENCHMARK_ROWS_END -->"
+            )
+    else:
+        header_line = _fmt_row(header)
+        separator_line = _fmt_separator()
+        table_content = (
+            f"<!-- Corpus: {corpus} -->"
+            + "\n\n"
+            + header_line
+            + "\n"
+            + separator_line
+            + "\n"
+            + "<!-- BENCHMARK_ROWS_START -->"
+            + "\n"
+            + new_block
+            + "\n"
+            + "<!-- BENCHMARK_ROWS_END -->"
+        )
+
     save_path.write_text(table_content)
     print(f"\nResults table written to: {save_path}")
+
+
+def _build_full_html(
+    header: list[str],
+    header_cells: list[str],
+    html_rows: list[str],
+    totals: list[str],
+    col_widths_px: list[int],
+    corpus: str,
+) -> str:
+    """Build a complete HTML file from scratch."""
+    total_cells = []
+    for i, cell in enumerate(totals):
+        width = col_widths_px[i]
+        total_cells.append(
+            f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
+            f'font-weight: bold; border-top: 2px solid #333;">**{cell}**</td>'
+        )
+    html_total = "<tr>" + "".join(total_cells) + "</tr>"
+
+    title = f"Results Table{f' — {corpus}' if corpus else ''}"
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Results Table</title>
+    <style>
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 24px;
+            margin: 0;
+        }}
+        .table-container {{
+            max-width: 960px;
+            margin: 0 auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }}
+        h2 {{
+            margin: 0;
+            padding: 16px 24px;
+            background: #1a73e8;
+            color: #fff;
+            font-size: 18px;
+            font-weight: 500;
+        }}
+        table {{
+            width: 100%;
+            border-collapse: collapse;
+        }}
+        thead th {{
+            background: #f8f9fa;
+            padding: 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 14px;
+            color: #555;
+            border-bottom: 2px solid #e0e0e0;
+        }}
+        tbody td {{
+            padding: 10px 12px;
+            font-size: 14px;
+            border-bottom: 1px solid #eee;
+        }}
+        tbody tr:hover {{
+            background: #f8f9fa;
+        }}
+        tbody tr:last-child td {{
+            border-bottom: none;
+        }}
+        tfoot td {{
+            padding: 12px;
+            font-weight: 600;
+            background: #f8f9fa;
+            border-top: 2px solid #1a73e8;
+        }}
+    </style>
+</head>
+<body>
+    <div class="table-container">
+        <h2>{title}</h2>
+        <table>
+            <thead>
+                <tr>
+{"".join(header_cells)}
+                </tr>
+            </thead>
+            <tbody id="benchmark-rows">
+{"".join(html_rows)}
+{html_total}
+            </tbody><!-- BENCHMARK_ROWS_END -->
+        </table>
+    </div>
+</body>
+</html>"""
+    return html_content
+
+
+def generate_html_table(
+    results: list[dict],
+    save_path: Path,
+    corpus: str = "",
+) -> None:
+    """Generate an HTML table with the same data as the Markdown table.
+
+    Appends new rows between markers so previous runs are preserved.
+    """
+    data = _build_table_data(results)
+    data["corpus"] = corpus
+
+    header = data["header"]
+    rows = data["rows"]
+    totals = data["totals"]
+
+    # Compute column widths for consistent styling
+    col_widths = [len(h) for h in header]
+    for row in rows:
+        for i, cell in enumerate(row):
+            col_widths[i] = max(col_widths[i], len(cell))
+    for i, cell in enumerate(totals):
+        col_widths[i] = max(col_widths[i], len(cell))
+
+    # Compute column widths in pixels (rough estimate: 8px per char + padding)
+    col_widths_px = [max(w * 8 + 20, 80) for w in col_widths]
+
+    html_rows = []
+    for row in rows:
+        cells = []
+        for i, cell in enumerate(row):
+            width = col_widths_px[i]
+            cells.append(
+                f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
+                f'border-bottom: 1px solid #ddd; vertical-align: top;">{cell}</td>'
+            )
+        html_rows.append("<tr>" + "".join(cells) + "</tr>")
+
+    total_cells = []
+    for i, cell in enumerate(totals):
+        width = col_widths_px[i]
+        total_cells.append(
+            f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
+            f'font-weight: bold; border-top: 2px solid #333;">**{cell}**</td>'
+        )
+    html_total = "<tr>" + "".join(total_cells) + "</tr>"
+
+    header_cells = []
+    for i, h in enumerate(header):
+        width = col_widths_px[i]
+        header_cells.append(f'<th style="width: {width}px;">{h}</th>')
+
+    new_tbody = "\n".join(html_rows)
+    new_total = f"\n{html_total}\n"
+
+    save_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if save_path.exists():
+        existing = save_path.read_text()
+        marker_start = "<tbody id=\"benchmark-rows\">"
+        marker_end = "</tbody><!-- BENCHMARK_ROWS_END -->"
+        start_idx = existing.find(marker_start)
+        end_idx = existing.find(marker_end)
+
+        if start_idx != -1 and end_idx != -1:
+            before = existing[: start_idx + len(marker_start)]
+            after = existing[end_idx:]
+            html_content = (
+                before
+                + new_tbody
+                + new_total
+                + after
+            )
+        else:
+            html_content = _build_full_html(
+                header, header_cells, html_rows, totals, col_widths_px, corpus
+            )
+    else:
+        html_content = _build_full_html(
+            header, header_cells, html_rows, totals, col_widths_px, corpus
+        )
+
+    save_path.write_text(html_content)
+    print(f"HTML results table written to: {save_path}")
 
 
 def run_visualization() -> None:
@@ -978,6 +1267,7 @@ def main() -> int:
     print(f"  User models:     {args.user_models_dir}")
     print(f"  Template dir:    {args.template_dir}")
     print(f"  Dry run:         {args.dry_run}")
+    print(f"  Clean run:       {args.clean_run}")
     print(f"  Save table:      {args.save_table}")
     print(f"  Cooldown (s):    {args.cooldown_seconds}")
     print(f"  Filter:          {args.filter or '(all)'}")
@@ -987,6 +1277,18 @@ def main() -> int:
     print(f"  Excludes:        {', '.join(excludes_list) if excludes_list else '(none)'}")
     print(f"  Context length:  {args.context_length}")
     print("=" * 60)
+
+    # Handle --clean-run: create initial marker files
+    if args.clean_run:
+        print("\n[Clean run] Removing previous results tables...")
+        save_table = args.save_table
+        html_table_path = save_table.with_suffix(".html")
+        if save_table.exists():
+            save_table.unlink()
+            print(f"  Removed: {save_table}")
+        if html_table_path.exists():
+            html_table_path.unlink()
+            print(f"  Removed: {html_table_path}")
 
     try:
         # Step 1: Discover models
@@ -1078,21 +1380,17 @@ def main() -> int:
             args.corpus, args.user_models_dir, Path("results")
         )
 
-        # Merge parsed results with benchmark results (by config path stem)
-        parsed_by_config = {str(r["config_path"]): r for r in parsed_results}
-        for br in benchmark_results:
-            cp = str(br["config_path"])
-            if cp in parsed_by_config:
-                parsed = parsed_by_config[cp]
-                br["passed"] = parsed["passed"]
-                br["hallucinated"] = parsed["hallucinated"]
-                br["bonus"] = parsed["bonus"]
-                br["error"] = parsed["error"]  # Override with JSON error status
-            # else: No JSON file found, keep benchmark result (all zeros)
+        # Merge parsed results with benchmark results (by config_path)
+        benchmark_results = merge_results(parsed_results, benchmark_results)
 
         # Step 6: Generate Markdown table
         print("\n[6/7] Generating Markdown results table...")
         generate_markdown_table(benchmark_results, args.save_table, args.corpus)
+
+        # Step 6b: Generate HTML table
+        html_table_path = args.save_table.with_suffix(".html")
+        print("\n[6b/7] Generating HTML results table...")
+        generate_html_table(benchmark_results, html_table_path, args.corpus)
 
         # Step 7: Run visualization (if not dry-run)
         if not args.dry_run:
