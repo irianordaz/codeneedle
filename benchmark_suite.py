@@ -1462,7 +1462,7 @@ def main() -> int:
     print(f"  Context length:  {args.context_length}")
     print("=" * 60)
 
-    # Handle --clean-run: create initial marker files
+    # Handle --clean-run: create initial marker files and delete corpus results
     if args.clean_run:
         print("\n[Clean run] Removing previous results tables...")
         save_table = args.save_table
@@ -1473,6 +1473,17 @@ def main() -> int:
         if html_table_path.exists():
             html_table_path.unlink()
             print(f"  Removed: {html_table_path}")
+
+        results_dir = Path("results")
+        if results_dir.exists():
+            corpus_prefix = f"{args.corpus}__"
+            removed = 0
+            for f in results_dir.glob("*.json"):
+                if f.name.startswith(corpus_prefix):
+                    f.unlink()
+                    removed += 1
+                    print(f"  Removed: {f}")
+            print(f"  Removed {removed} result file(s) for corpus '{args.corpus}'.")
 
     try:
         # Step 1: Discover models
