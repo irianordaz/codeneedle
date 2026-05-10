@@ -21,3 +21,6 @@ venv/
 # Benchmark outputs — each user generates their own
 results/*.json
 analysis/charts/
+# pixi environments
+.pixi/*
+!.pixi/config.toml
