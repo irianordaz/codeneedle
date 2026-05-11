@@ -31,7 +31,7 @@ DEFAULT_USER_MODELS_DIR = Path("configs/models/user")
 DEFAULT_TEMPLATE_DIR = Path("configs/models")
 DEFAULT_SAVE_TABLE = Path("results_table.md")
 DEFAULT_COOLDOWN_SECONDS = 30
-DEFAULT_SUBPROCESS_TIMEOUT = 3600  # 1 hour per model, generous
+DEFAULT_SUBPROCESS_TIMEOUT = 10000  # ~2.8 hours per model
 
 
 class BenchmarkError(Exception):
@@ -569,6 +569,12 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Seconds to wait between benchmarks (default: {DEFAULT_COOLDOWN_SECONDS}).",
     )
     parser.add_argument(
+        "--timeout",
+        type=float,
+        default=DEFAULT_SUBPROCESS_TIMEOUT,
+        help=f"Per-model subprocess timeout in seconds (default: {DEFAULT_SUBPROCESS_TIMEOUT}).",
+    )
+    parser.add_argument(
         "--includes",
         type=str,
         default=None,
@@ -789,6 +795,8 @@ def run_benchmarks(
                 corpus_value,
                 "--model",
                 str(config_path),
+                "--timeout",
+                str(subprocess_timeout),
             ]
             print(f"  Running: {' '.join(cmd)}")
             # Stream output live so the user sees progress
@@ -1522,6 +1530,7 @@ def main() -> int:
     print(f"  Clean run:       {args.clean_run}")
     print(f"  Save table:      {args.save_table}")
     print(f"  Cooldown (s):    {args.cooldown_seconds}")
+    print(f"  Timeout (s):     {args.timeout}")
     includes_list = [k.strip() for k in args.includes.split(",") if k.strip()] if args.includes else []
     excludes_list = [k.strip() for k in args.excludes.split(",") if k.strip()] if args.excludes else []
     print(f"  Includes:        {', '.join(includes_list) if includes_list else '(all)'}")
@@ -1649,6 +1658,7 @@ def main() -> int:
             corpus=args.corpus,
             cooldown_seconds=args.cooldown_seconds,
             dry_run=args.dry_run,
+            subprocess_timeout=args.timeout,
         )
 
         # Step 5: Parse results from JSON dump files (if any were generated)
