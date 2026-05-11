@@ -905,7 +905,7 @@ def _build_table_data(results: list[dict]) -> dict:
         key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
     )
 
-    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Runtime (s)"]
+    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Max Tokens", "Runtime (s)"]
     rows: list[list[str]] = []
 
     total_passed = 0
@@ -924,10 +924,26 @@ def _build_table_data(results: list[dict]) -> dict:
         runtime = r.get("runtime", 0.0)
         error = r.get("error")
 
+        # Extract max_tokens from the TOML config file
+        max_tokens_value = "—"
+        if isinstance(config_path, Path) and config_path.exists():
+            try:
+                content = config_path.read_text()
+                import re as _re
+                mt_match = _re.search(r"^max_tokens\s*=\s*(\d+)", content, _re.MULTILINE)
+                if mt_match:
+                    mt_int = int(mt_match.group(1))
+                    if mt_int >= 1000:
+                        max_tokens_value = f"{mt_int // 1000}K"
+                    else:
+                        max_tokens_value = str(mt_int)
+            except Exception:
+                pass
+
         if error:
             model = f"{model} (ERROR: {error})"
 
-        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), f"{runtime:.1f}"])
+        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), max_tokens_value, f"{runtime:.1f}"])
 
         total_passed += passed
         total_hallucinated += hallucinated
@@ -935,7 +951,7 @@ def _build_table_data(results: list[dict]) -> dict:
         total_primary += primary
         total_runtime += runtime
 
-    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), f"{total_runtime:.1f}"]
+    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), "", f"{total_runtime:.1f}"]
     return {
         "header": header,
         "rows": rows,
