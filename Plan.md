@@ -9,8 +9,7 @@ Create `benchmark_suite.py` — a standalone Python script that discovers all mo
 1. Discover all LMStudio models via `lms ls`
 2. Use templates from `configs/models/` to find the best starting point per model
 3. Create config files in `configs/models/user/` (create if not exists)
-4. Name each config: `{model}-{framework}-{max_tokens}.toml` where `{framework}` is `gguf` or `mlx`, round max_tokens to nearest thousands and add a K (example 65000 -> 65K)
-5. Accept `max_tokens` as a top-level script default and CLI option; update all user TOMLs with it
+4. Name each model config: `{model}-{framework} where `{framework}` is `gguf` or `mlx`
 6. Run each benchmark with `pixi run python bench.py run --corpus {code} --model {model}`
 7. Sleep 30 seconds between benchmarks
 8. Run `pixi run python analysis/visualize.py` at the end

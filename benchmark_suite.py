@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Benchmark suite orchestrator for LMStudio models.
 
-Discovers all models via `lms ls`, creates per-model config TOMLs from
-templates in `configs/models/`, runs benchmarks sequentially with configurable
-pauses, produces a Markdown results table (with runtime and totals), and
-generates visual reports.
+    Discovers all models via `lms ls`, creates per-model config TOMLs from
+    templates in `configs/models/`, runs benchmarks sequentially with configurable
+    pauses, produces a Markdown results table (with runtime and totals), and
+    generates visual reports.
 
-Usage:
-    pixi run python benchmark_suite.py --corpus http_server
-    pixi run python benchmark_suite.py --corpus jquery --max-tokens 128000
-    pixi run python benchmark_suite.py --corpus jquery --dry-run
-"""
+    Usage:
+        pixi run python benchmark_suite.py --corpus http_server
+        pixi run python benchmark_suite.py --corpus jquery --min-size 25B
+        pixi run python benchmark_suite.py --corpus jquery --dry-run
+    """
 
 from __future__ import annotations
 
@@ -26,7 +26,6 @@ from pathlib import Path
 # Defaults
 # ---------------------------------------------------------------------------
 
-DEFAULT_MAX_TOKENS = 32768
 DEFAULT_CORPORA_DIR = Path("configs/corpora")
 DEFAULT_USER_MODELS_DIR = Path("configs/models/user")
 DEFAULT_TEMPLATE_DIR = Path("configs/models")
@@ -49,17 +48,6 @@ def normalize_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]", "", name.lower())
 
 
-def round_to_nearest_thousands(value: int) -> int:
-    """Round to nearest thousand."""
-    return round(value / 1000) * 1000
-
-
-def format_max_tokens(value: int) -> str:
-    """Format max_tokens as 65K, 128K, etc (for filenames only)."""
-    rounded = round_to_nearest_thousands(value)
-    return f"{rounded // 1000}K"
-
-
 def sanitize_model_name(name: str) -> str:
     """Replace slashes and special chars with underscores for filenames."""
     return re.sub(r"[^a-zA-Z0-9]", "_", name)
@@ -70,6 +58,44 @@ def determine_framework(model_name: str) -> str:
     if "mlx" in model_name.lower():
         return "mlx"
     return "gguf"
+
+
+def parse_model_params(toml_path: Path) -> int | None:
+    """Read number_of_parameters from a TOML config file.
+
+    Returns the parameter count in billions, or None if not found.
+    """
+    if not toml_path.is_file():
+        return None
+    content = toml_path.read_text()
+    match = re.search(
+        r"^number_of_parameters\s*=\s*(\d+)", content, re.MULTILINE
+    )
+    if match:
+        return int(match.group(1))
+    return None
+
+
+def parse_min_size(args_min_size: str | None) -> int | None:
+    """Parse the --min-size argument into billion-of-parameters integer.
+
+    Accepts values like '25B', '25', '3.5B', '3.5'.
+    Returns the number of parameters in billions, or None if not set.
+    """
+    if not args_min_size:
+        return None
+    args_min_size = args_min_size.strip().upper()
+    # Strip trailing 'B' if present
+    numeric_str = args_min_size.rstrip("B")
+    try:
+        return int(float(numeric_str))
+    except ValueError:
+        print(
+            f"WARNING: Invalid --min-size value '{args_min_size}'. "
+            "Expected a number optionally followed by 'B' (e.g. '25B' or '25').",
+            file=sys.stderr,
+        )
+        return None
 
 
 def _longest_common_substring(s1: str, s2: str) -> str:
@@ -155,42 +181,18 @@ def find_best_template(model_name: str, template_dir: Path) -> Path | None:
     return best_match
 
 
-def update_max_tokens_in_toml(content: str, new_max_tokens: int) -> str:
-    """Update the max_tokens value in a TOML file content string.
-
-    Inserts a new line if the template lacks a max_tokens field.
-    """
-    if re.search(r"^max_tokens\s*=", content, re.MULTILINE):
-        return re.sub(
-            r"(max_tokens\s*=\s*)\d+",
-            rf"\g<1>{new_max_tokens}",
-            content,
-        )
-    # Insert max_tokens line after the name field (or at the top if no name)
-    name_match = re.search(r"^name\s*=", content, re.MULTILINE)
-    if name_match:
-        insert_pos = name_match.end()
-        return (
-            content[:insert_pos]
-            + f"\nmax_tokens = {new_max_tokens}"
-            + content[insert_pos:]
-        )
-    return content + f"\nmax_tokens = {new_max_tokens}\n"
-
-
 def create_minimal_toml(
-    model_name: str, framework: str, max_tokens: int
+    model_name: str, framework: str, number_of_parameters: int
 ) -> str:
     """Generate a minimal TOML config when no template is found.
 
-    Uses the numeric integer value for max_tokens (not formatted as 65K)
-    so tomllib can parse it.
+    Uses number_of_parameters (in billions) so the config tracks model size.
     """
     return (
         f'name = "{model_name}"\n'
         f'base_url = "http://localhost:1234"\n'
         f"temperature = 0.0\n"
-        f"max_tokens = {max_tokens}\n"
+        f"number_of_parameters = {number_of_parameters}\n"
         f"timeout = 10000.0\n"
         f"suppress_thinking = true\n"
     )
@@ -207,6 +209,26 @@ def update_toml_name_field(content: str, new_name: str) -> str:
     )
 
 
+def update_number_of_params_in_toml(content: str, number_of_parameters: int) -> str:
+    """Update (or insert) the number_of_parameters value in a TOML file content string."""
+    if re.search(r"^number_of_parameters\s*=", content, re.MULTILINE):
+        return re.sub(
+            r"(number_of_parameters\s*=\s*)\d+",
+            rf"\g<1>{number_of_parameters}",
+            content,
+        )
+    # Insert number_of_parameters line after the name field (or at the top if no name)
+    name_match = re.search(r"^name\s*=", content, re.MULTILINE)
+    if name_match:
+        insert_pos = name_match.end()
+        return (
+            content[:insert_pos]
+            + f"\nnumber_of_parameters = {number_of_parameters}"
+            + content[insert_pos:]
+        )
+    return content + f"\nnumber_of_parameters = {number_of_parameters}\n"
+
+
 def read_toml_field(content: str, field: str) -> str | None:
     """Extract the value of a field from a TOML file content string."""
     match = re.search(
@@ -217,13 +239,13 @@ def read_toml_field(content: str, field: str) -> str | None:
     return None
 
 
-def parse_lms_ls(output: str) -> list[str]:
-    """Parse the output of `lms ls` to extract all installed model names.
+def parse_lms_ls(output: str) -> list[tuple[str, str | None]]:
+    """Parse the output of `lms ls` to extract model names and PARAMS values.
 
-    Handles LMStudio's tabular output format. Returns ALL installed models
-    (both loaded and unloaded). Embedding models are excluded.
+    Handles LMStudio's tabular output format. Returns a list of (model_name, params) tuples.
+    Embedding models are excluded. PARAMS may be None if not present.
     """
-    models = []
+    models: list[tuple[str, str | None]] = []
     in_llm_section = False
 
     for line in output.strip().splitlines():
@@ -259,10 +281,45 @@ def parse_lms_ls(output: str) -> list[str]:
         # Extract model name from the first column
         # Format: "model/name (1 variant)" or "model/name"
         match = re.match(r"^(\S+?)(?:\s*\([^)]*\))?\s+", stripped)
-        if match:
-            models.append(match.group(1))
+        if not match:
+            continue
+
+        model_name = match.group(1)
+
+        # Extract PARAMS value (second column)
+        # Find the position after the model name to get the rest of the line
+        rest = stripped[match.end():]
+        params_match = re.match(r"(\S+)", rest)
+        params_value = params_match.group(1) if params_match else None
+
+        models.append((model_name, params_value))
 
     return models
+
+
+def parse_params_value(params_str: str | None) -> int | None:
+    """Parse a PARAMS value from `lms ls` into billion-of-parameters integer.
+
+    Handles values like '7B', '3.5B', '7B-14B', etc.
+    If the value has a hyphen, split at the hyphen and take the first value.
+    Returns the parameter count in billions, or None if not parseable.
+    """
+    if params_str is None:
+        return None
+    params_str = params_str.strip().upper()
+    if not params_str:
+        return None
+    # Handle hyphenated ranges (e.g., "7B-14B") - take the first value
+    if '-' in params_str:
+        params_str = params_str.split('-')[0]
+    # Strip trailing 'B' if present
+    numeric_str = params_str.rstrip("B")
+    if not numeric_str:
+        return None
+    try:
+        return int(float(numeric_str))
+    except ValueError:
+        return None
 
 
 def parse_loaded_models(output: str) -> list[str]:
@@ -366,14 +423,12 @@ def run_subprocess(
         return subprocess.run(cmd, **kwargs)
 
 
-def load_model(model_name: str, context_length: int = 131072) -> bool:
+def load_model(model_name: str) -> bool:
     """Load a model in LM Studio. Returns True on success."""
     cmd = [
         "lms",
         "load",
         model_name,
-        "--context-length",
-        str(context_length),
         "--gpu",
         "max",
         "--ttl",
@@ -467,10 +522,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Corpus config name (e.g. 'http_server') or path to a Python source file.",
     )
     parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=DEFAULT_MAX_TOKENS,
-        help=f"Max tokens applied to all user configs and CLI overrides (default: {DEFAULT_MAX_TOKENS}).",
+        "--min-size",
+        type=str,
+        default=None,
+        help="Only benchmark models with number_of_parameters >= this value (in billions). "
+             "Accepts values like '25B' or '25'.",
     )
     parser.add_argument(
         "--corpora-dir",
@@ -513,12 +569,6 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"Seconds to wait between benchmarks (default: {DEFAULT_COOLDOWN_SECONDS}).",
     )
     parser.add_argument(
-        "--filter",
-        type=str,
-        default=None,
-        help="Only benchmark models whose name contains this string (case-insensitive).",
-    )
-    parser.add_argument(
         "--includes",
         type=str,
         default=None,
@@ -529,12 +579,6 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Comma-delimited list of keywords; models containing ANY of these keywords will be excluded (case-insensitive).",
-    )
-    parser.add_argument(
-        "--context-length",
-        type=int,
-        default=131072,
-        help="Context length to use when loading models (default: 131072).",
     )
     return parser
 
@@ -558,20 +602,42 @@ def discover_models() -> list[str]:
             f"'lms ls' failed with code {result.returncode}: {result.stderr}"
         )
 
-    models = parse_lms_ls(result.stdout)
-    if not models:
+    parsed = parse_lms_ls(result.stdout)
+    if not parsed:
         raise BenchmarkError(
             "No models found via 'lms ls'. Install a model in LM Studio first."
         )
 
-    return models
+    return [m[0] for m in parsed]
+
+
+def discover_models_with_params() -> list[tuple[str, str | None]]:
+    """Discover all installed models via `lms ls`, returning (model_name, params) tuples."""
+    try:
+        result = run_subprocess(["lms", "ls"])
+    except FileNotFoundError:
+        raise BenchmarkError(
+            "'lms' executable not found. Is LMStudio installed and on PATH?"
+        )
+
+    if result.returncode != 0:
+        raise BenchmarkError(
+            f"'lms ls' failed with code {result.returncode}: {result.stderr}"
+        )
+
+    parsed = parse_lms_ls(result.stdout)
+    if not parsed:
+        raise BenchmarkError(
+            "No models found via 'lms ls'. Install a model in LM Studio first."
+        )
+
+    return parsed
 
 
 def generate_user_configs(
     models: list[str],
     template_dir: Path,
     user_models_dir: Path,
-    max_tokens: int,
     dry_run: bool = False,
 ) -> list[Path]:
     """Create a user config TOML for each model.
@@ -585,10 +651,9 @@ def generate_user_configs(
 
     for model_name in models:
         framework = determine_framework(model_name)
-        formatted_max_tokens = format_max_tokens(max_tokens)
         safe_name = sanitize_model_name(model_name)
 
-        toml_filename = f"{safe_name}-{framework}-{formatted_max_tokens}.toml"
+        toml_filename = f"{safe_name}-{framework}.toml"
 
         # Collision detection: sanitize_model_name can collapse different models to the same filename (e.g. "qwen/qwen3.6" and "qwen-qwen3.6"). Append a short hash if collision detected.
         if toml_filename in seen_filenames:
@@ -611,14 +676,18 @@ def generate_user_configs(
 
         if template is not None:
             content = template.read_text()
-            content = update_max_tokens_in_toml(content, max_tokens)
+            # Update number_of_parameters from template (or add if missing)
+            model_params = parse_model_params(template)
+            if model_params is not None:
+                content = update_number_of_params_in_toml(content, model_params)
             # Bug #3 fix: update the name field to the discovered LMStudio model id
             content = update_toml_name_field(content, model_name)
         else:
             print(
                 f"  (no template found for {model_name}, generating minimal config)"
             )
-            content = create_minimal_toml(model_name, framework, max_tokens)
+            # Default to 0 params (unknown) when no template exists
+            content = create_minimal_toml(model_name, framework, 0)
 
         toml_path.write_text(content)
         created.append(toml_path)
@@ -633,7 +702,6 @@ def run_benchmarks(
     cooldown_seconds: int,
     dry_run: bool = False,
     subprocess_timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
-    context_length: int = 131072,
 ) -> list[dict]:
     """Run benchmarks for each config, sleeping between runs.
 
@@ -687,7 +755,7 @@ def run_benchmarks(
             continue
 
         # Load the model before benchmarking
-        if not load_model(model_name, context_length):
+        if not load_model(model_name):
             print(
                 f"  SKIPPED: failed to load {model_name}.",
                 file=sys.stderr,
@@ -905,7 +973,7 @@ def _build_table_data(results: list[dict]) -> dict:
         key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
     )
 
-    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Max Tokens", "Runtime (s)"]
+    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Runtime (s)"]
     rows: list[list[str]] = []
 
     total_passed = 0
@@ -924,26 +992,10 @@ def _build_table_data(results: list[dict]) -> dict:
         runtime = r.get("runtime", 0.0)
         error = r.get("error")
 
-        # Extract max_tokens from the TOML config file
-        max_tokens_value = "—"
-        if isinstance(config_path, Path) and config_path.exists():
-            try:
-                content = config_path.read_text()
-                import re as _re
-                mt_match = _re.search(r"^max_tokens\s*=\s*(\d+)", content, _re.MULTILINE)
-                if mt_match:
-                    mt_int = int(mt_match.group(1))
-                    if mt_int >= 1000:
-                        max_tokens_value = f"{mt_int // 1000}K"
-                    else:
-                        max_tokens_value = str(mt_int)
-            except Exception:
-                pass
-
         if error:
             model = f"{model} (ERROR: {error})"
 
-        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), max_tokens_value, f"{runtime:.1f}"])
+        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), f"{runtime:.1f}"])
 
         total_passed += passed
         total_hallucinated += hallucinated
@@ -951,7 +1003,7 @@ def _build_table_data(results: list[dict]) -> dict:
         total_primary += primary
         total_runtime += runtime
 
-    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), "", f"{total_runtime:.1f}"]
+    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), f"{total_runtime:.1f}"]
     return {
         "header": header,
         "rows": rows,
@@ -1462,7 +1514,7 @@ def main() -> int:
     print("  Benchmark Suite — LMStudio Model Orchestrator")
     print("=" * 60)
     print(f"  Corpus:          {args.corpus}")
-    print(f"  Max tokens:      {args.max_tokens}")
+    print(f"  Min size (B):    {args.min_size or '(all)'}")
     print(f"  Corpora dir:     {args.corpora_dir}")
     print(f"  User models:     {args.user_models_dir}")
     print(f"  Template dir:    {args.template_dir}")
@@ -1470,12 +1522,10 @@ def main() -> int:
     print(f"  Clean run:       {args.clean_run}")
     print(f"  Save table:      {args.save_table}")
     print(f"  Cooldown (s):    {args.cooldown_seconds}")
-    print(f"  Filter:          {args.filter or '(all)'}")
     includes_list = [k.strip() for k in args.includes.split(",") if k.strip()] if args.includes else []
     excludes_list = [k.strip() for k in args.excludes.split(",") if k.strip()] if args.excludes else []
     print(f"  Includes:        {', '.join(includes_list) if includes_list else '(all)'}")
     print(f"  Excludes:        {', '.join(excludes_list) if excludes_list else '(none)'}")
-    print(f"  Context length:  {args.context_length}")
     print("=" * 60)
 
     # Handle --clean-run: create initial marker files and delete corpus results
@@ -1505,15 +1555,6 @@ def main() -> int:
         # Step 1: Discover models
         print("\n[1/7] Discovering LMStudio models...")
         models = discover_models()
-        if args.filter:
-            f = args.filter.lower()
-            models = [m for m in models if f in m.lower()]
-            if not models:
-                print(
-                    f"No models match filter '{args.filter}'.",
-                    file=sys.stderr,
-                )
-                return 1
 
         # Apply --includes filter
         if includes_list:
@@ -1544,6 +1585,33 @@ def main() -> int:
                     file=sys.stderr,
                 )
                 return 1
+
+        # Apply --min-size filter based on PARAMS from `lms ls`
+        min_size = parse_min_size(args.min_size)
+        if min_size is not None:
+            # Use discover_models_with_params to get PARAMS values from lms ls output
+            models_with_params = discover_models_with_params()
+            filtered = []
+            for model_name, params_str in models_with_params:
+                if model_name not in models:
+                    continue
+                parsed_params = parse_params_value(params_str)
+                if parsed_params is not None and parsed_params >= min_size:
+                    filtered.append(model_name)
+                elif parsed_params is None:
+                    # If no params from lms ls, include it (can't filter)
+                    print(
+                        f"  WARNING: No PARAMS value for {model_name} in `lms ls` output, including by default.",
+                        file=sys.stderr,
+                    )
+                    filtered.append(model_name)
+            models = filtered
+            if not models:
+                print(
+                    f"No models meet the --min-size {args.min_size} threshold.",
+                    file=sys.stderr,
+                )
+                return 1
         print(f"  Found {len(models)} model(s):")
         for m in models:
             print(f"    - {m}")
@@ -1559,7 +1627,6 @@ def main() -> int:
             models=models,
             template_dir=args.template_dir,
             user_models_dir=args.user_models_dir,
-            max_tokens=args.max_tokens,
             dry_run=args.dry_run,
         )
 
@@ -1582,7 +1649,6 @@ def main() -> int:
             corpus=args.corpus,
             cooldown_seconds=args.cooldown_seconds,
             dry_run=args.dry_run,
-            context_length=args.context_length,
         )
 
         # Step 5: Parse results from JSON dump files (if any were generated)
