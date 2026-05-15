@@ -1812,6 +1812,11 @@ def main() -> int:
     )
     print("=" * 60)
 
+    # Ensure all relevant directories exist
+    args.corpora_dir.mkdir(parents=True, exist_ok=True)
+    args.template_dir.mkdir(parents=True, exist_ok=True)
+    args.user_models_dir.mkdir(parents=True, exist_ok=True)
+
     # Handle --clean-run: create initial marker files and delete corpus results
     if args.clean_run:
         print("\n[Clean run] Removing previous results tables...")
