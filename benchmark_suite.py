@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
-"""Benchmark suite orchestrator for LMStudio models.
+"""Benchmark suite orchestrator for LMStudio and Ollama models.
 
-    Discovers all models via `lms ls`, creates per-model config TOMLs from
-    templates in `configs/models/`, runs benchmarks sequentially with configurable
-    pauses, produces a Markdown results table (with runtime and totals), and
-    generates visual reports.
+Discovers all models via `lms ls` or `ollama ls`, creates per-model config
+TOMLs from templates in `configs/models/`, runs benchmarks sequentially with
+configurable pauses, produces a Markdown results table (with runtime and
+totals), and generates visual reports.
 
-    Usage:
-        pixi run python benchmark_suite.py --corpus http_server
-        pixi run python benchmark_suite.py --corpus jquery --min-size 25B
-        pixi run python benchmark_suite.py --corpus jquery --dry-run
-    """
+Usage:
+    pixi run python benchmark_suite.py --corpus http_server
+    pixi run python benchmark_suite.py --corpus jquery --min-size 25B
+    pixi run python benchmark_suite.py --corpus jquery --dry-run
+    pixi run python benchmark_suite.py --corpus http_server --runner ollama
+"""
 
 from __future__ import annotations
 
@@ -32,6 +33,7 @@ DEFAULT_TEMPLATE_DIR = Path("configs/models")
 DEFAULT_SAVE_TABLE = Path("results_table.md")
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_SUBPROCESS_TIMEOUT = 10000  # ~2.8 hours per model
+DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
 
 
 class BenchmarkError(Exception):
@@ -182,7 +184,10 @@ def find_best_template(model_name: str, template_dir: Path) -> Path | None:
 
 
 def create_minimal_toml(
-    model_name: str, framework: str, number_of_parameters: int
+    model_name: str,
+    framework: str,
+    number_of_parameters: int,
+    base_url: str = "http://localhost:1234",
 ) -> str:
     """Generate a minimal TOML config when no template is found.
 
@@ -190,7 +195,7 @@ def create_minimal_toml(
     """
     return (
         f'name = "{model_name}"\n'
-        f'base_url = "http://localhost:1234"\n'
+        f'base_url = "{base_url}"\n'
         f"temperature = 0.0\n"
         f"number_of_parameters = {number_of_parameters}\n"
         f"timeout = 10000.0\n"
@@ -209,7 +214,9 @@ def update_toml_name_field(content: str, new_name: str) -> str:
     )
 
 
-def update_number_of_params_in_toml(content: str, number_of_parameters: int) -> str:
+def update_number_of_params_in_toml(
+    content: str, number_of_parameters: int
+) -> str:
     """Update (or insert) the number_of_parameters value in a TOML file content string."""
     if re.search(r"^number_of_parameters\s*=", content, re.MULTILINE):
         return re.sub(
@@ -288,7 +295,7 @@ def parse_lms_ls(output: str) -> list[tuple[str, str | None]]:
 
         # Extract PARAMS value (second column)
         # Find the position after the model name to get the rest of the line
-        rest = stripped[match.end():]
+        rest = stripped[match.end() :]
         params_match = re.match(r"(\S+)", rest)
         params_value = params_match.group(1) if params_match else None
 
@@ -310,8 +317,8 @@ def parse_params_value(params_str: str | None) -> int | None:
     if not params_str:
         return None
     # Handle hyphenated ranges (e.g., "7B-14B") - take the first value
-    if '-' in params_str:
-        params_str = params_str.split('-')[0]
+    if "-" in params_str:
+        params_str = params_str.split("-")[0]
     # Strip trailing 'B' if present
     numeric_str = params_str.rstrip("B")
     if not numeric_str:
@@ -478,6 +485,143 @@ def unload_model(model_name: str) -> bool:
         return False
 
 
+def parse_ollama_ls(output: str) -> list[tuple[str, str | None]]:
+    """Parse the output of `ollama ls` to extract model names and PARAMS values.
+
+    Returns a list of (model_name, params) tuples.
+    PARAMS may be None if not present.
+    """
+    models: list[tuple[str, str | None]] = []
+
+    for line in output.strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Skip header line
+        if re.match(r"^NAME\s+ID\s+", stripped, re.IGNORECASE):
+            continue
+
+        # Skip summary line if present
+        if "models" in stripped.lower() and "taking" in stripped.lower():
+            continue
+
+        # Extract model name (first column) and size/params (third column)
+        # Format: "model:name    <id>    <size>    <modified>"
+        parts = stripped.split()
+        if len(parts) >= 3:
+            model_name = parts[0]
+            # The size field (e.g., "37 GB", "19 GB") - not params in billions
+            # We'll use it as-is since ollama doesn't expose parameter counts directly
+            size = parts[2] if len(parts) > 2 else None
+            models.append((model_name, size))
+
+    return models
+
+
+def parse_ollama_ps(output: str) -> list[str]:
+    """Parse the output of `ollama ps` to extract only LOADED model names."""
+    loaded = []
+
+    for line in output.strip().splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        # Skip header line
+        if re.match(r"^NAME\s+ID\s+", stripped, re.IGNORECASE):
+            continue
+
+        # Skip summary line if present
+        if "models" in stripped.lower() and "taking" in stripped.lower():
+            continue
+
+        # Extract model name (first column)
+        parts = stripped.split()
+        if parts:
+            loaded.append(parts[0])
+
+    return loaded
+
+
+def ollama_load_model(model_name: str) -> bool:
+    """Pull/load a model in Ollama. Returns True on success."""
+    cmd = [
+        "ollama",
+        "pull",
+        model_name,
+    ]
+    try:
+        result = run_subprocess(cmd, check=False, stream=True)
+        if result.returncode == 0:
+            print(f"  Loaded: {model_name}")
+            return True
+        else:
+            print(
+                f"  ERROR loading {model_name}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return False
+    except Exception as e:
+        print(f"  ERROR loading {model_name}: {e}", file=sys.stderr)
+        return False
+
+
+def ollama_unload_model(model_name: str) -> bool:
+    """Unload (delete) a model from Ollama. Returns True on success."""
+    cmd = ["ollama", "rm", model_name]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode == 0:
+            print(f"  Unloaded: {model_name}")
+            return True
+        else:
+            # Model may not exist — that's OK
+            if "not found" in (result.stderr or "").lower():
+                return True
+            print(
+                f"  WARNING unloading {model_name}: {result.stderr.strip()}",
+                file=sys.stderr,
+            )
+            return False
+    except Exception as e:
+        print(f"  WARNING unloading {model_name}: {e}", file=sys.stderr)
+        return False
+
+
+def ollama_unload_all_loaded() -> list[str]:
+    """Unload all currently loaded models in Ollama. Returns list of unloaded model names."""
+    try:
+        result = run_subprocess(["ollama", "ps"])
+        if result.returncode != 0:
+            print(
+                f"WARNING: 'ollama ps' failed ({result.returncode}), "
+                "cannot determine loaded models.",
+                file=sys.stderr,
+            )
+            return []
+    except FileNotFoundError:
+        print(
+            "WARNING: 'ollama' not found, skipping preload cleanup.",
+            file=sys.stderr,
+        )
+        return []
+
+    loaded = parse_ollama_ps(result.stdout)
+    if not loaded:
+        return []
+
+    unloaded = []
+    for model in loaded:
+        if ollama_unload_model(model):
+            unloaded.append(model)
+    return unloaded
+
+
 def unload_all_loaded() -> list[str]:
     """Unload all currently loaded models. Returns list of unloaded model names."""
     try:
@@ -514,7 +658,14 @@ def unload_all_loaded() -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Benchmark suite orchestrator for LMStudio models.",
+        description="Benchmark suite orchestrator for LMStudio and Ollama models.",
+    )
+    parser.add_argument(
+        "--runner",
+        type=str,
+        default="lmstudio",
+        help="Model runner(s) to benchmark, comma-delimited (default: lmstudio). "
+        "Choices: lmstudio, ollama. Example: --runner lmstudio,ollama",
     )
     parser.add_argument(
         "--corpus",
@@ -526,7 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=str,
         default=None,
         help="Only benchmark models with number_of_parameters >= this value (in billions). "
-             "Accepts values like '25B' or '25'.",
+        "Accepts values like '25B' or '25'.",
     )
     parser.add_argument(
         "--corpora-dir",
@@ -594,7 +745,14 @@ def build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
-def discover_models() -> list[str]:
+def discover_models(runner: str = "lmstudio") -> list[str]:
+    """Discover all installed models via `lms ls` or `ollama ls`."""
+    if runner == "ollama":
+        return discover_models_ollama()
+    return discover_models_lmstudio()
+
+
+def discover_models_lmstudio() -> list[str]:
     """Discover all installed models via `lms ls`."""
     try:
         result = run_subprocess(["lms", "ls"])
@@ -617,7 +775,39 @@ def discover_models() -> list[str]:
     return [m[0] for m in parsed]
 
 
-def discover_models_with_params() -> list[tuple[str, str | None]]:
+def discover_models_ollama() -> list[str]:
+    """Discover all installed models via `ollama ls`."""
+    try:
+        result = run_subprocess(["ollama", "ls"])
+    except FileNotFoundError:
+        raise BenchmarkError(
+            "'ollama' executable not found. Is Ollama installed and on PATH?"
+        )
+
+    if result.returncode != 0:
+        raise BenchmarkError(
+            f"'ollama ls' failed with code {result.returncode}: {result.stderr}"
+        )
+
+    parsed = parse_ollama_ls(result.stdout)
+    if not parsed:
+        raise BenchmarkError(
+            "No models found via 'ollama ls'. Install a model with 'ollama pull' first."
+        )
+
+    return [m[0] for m in parsed]
+
+
+def discover_models_with_params(
+    runner: str = "lmstudio",
+) -> list[tuple[str, str | None]]:
+    """Discover all installed models, returning (model_name, params) tuples."""
+    if runner == "ollama":
+        return discover_models_with_params_ollama()
+    return discover_models_with_params_lmstudio()
+
+
+def discover_models_with_params_lmstudio() -> list[tuple[str, str | None]]:
     """Discover all installed models via `lms ls`, returning (model_name, params) tuples."""
     try:
         result = run_subprocess(["lms", "ls"])
@@ -640,17 +830,47 @@ def discover_models_with_params() -> list[tuple[str, str | None]]:
     return parsed
 
 
+def discover_models_with_params_ollama() -> list[tuple[str, str | None]]:
+    """Discover all installed models via `ollama ls`, returning (model_name, params) tuples."""
+    try:
+        result = run_subprocess(["ollama", "ls"])
+    except FileNotFoundError:
+        raise BenchmarkError(
+            "'ollama' executable not found. Is Ollama installed and on PATH?"
+        )
+
+    if result.returncode != 0:
+        raise BenchmarkError(
+            f"'ollama ls' failed with code {result.returncode}: {result.stderr}"
+        )
+
+    parsed = parse_ollama_ls(result.stdout)
+    if not parsed:
+        raise BenchmarkError(
+            "No models found via 'ollama ls'. Install a model with 'ollama pull' first."
+        )
+
+    return parsed
+
+
 def generate_user_configs(
     models: list[str],
     template_dir: Path,
     user_models_dir: Path,
     dry_run: bool = False,
+    runner: str = "lmstudio",
 ) -> list[Path]:
     """Create a user config TOML for each model.
 
     Returns the list of created config file paths.
     """
     user_models_dir.mkdir(parents=True, exist_ok=True)
+
+    base_url = (
+        DEFAULT_OLLAMA_BASE_URL
+        if runner == "ollama"
+        else "http://localhost:1234"
+    )
 
     created: list[Path] = []
     seen_filenames: dict[str, Path] = {}  # For collision detection
@@ -686,14 +906,22 @@ def generate_user_configs(
             model_params = parse_model_params(template)
             if model_params is not None:
                 content = update_number_of_params_in_toml(content, model_params)
-            # Bug #3 fix: update the name field to the discovered LMStudio model id
+            # Bug #3 fix: update the name field to the discovered model id
             content = update_toml_name_field(content, model_name)
+            # Update base_url for the runner
+            content = re.sub(
+                r"^(base_url\s*=\s*).+",
+                rf'\g<1>"{base_url}"',
+                content,
+                count=1,
+                flags=re.MULTILINE,
+            )
         else:
             print(
                 f"  (no template found for {model_name}, generating minimal config)"
             )
             # Default to 0 params (unknown) when no template exists
-            content = create_minimal_toml(model_name, framework, 0)
+            content = create_minimal_toml(model_name, framework, 0, base_url)
 
         toml_path.write_text(content)
         created.append(toml_path)
@@ -708,6 +936,7 @@ def run_benchmarks(
     cooldown_seconds: int,
     dry_run: bool = False,
     subprocess_timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
+    runner: str = "lmstudio",
 ) -> list[dict]:
     """Run benchmarks for each config, sleeping between runs.
 
@@ -721,6 +950,11 @@ def run_benchmarks(
       - error: error message if the benchmark failed
     """
     results: list[dict] = []
+
+    load_model_fn = ollama_load_model if runner == "ollama" else load_model
+    unload_model_fn = (
+        ollama_unload_model if runner == "ollama" else unload_model
+    )
 
     # Determine if corpus is a file path or corpus config name
     corpus_path = Path(corpus)
@@ -761,7 +995,7 @@ def run_benchmarks(
             continue
 
         # Load the model before benchmarking
-        if not load_model(model_name):
+        if not load_model_fn(model_name):
             print(
                 f"  SKIPPED: failed to load {model_name}.",
                 file=sys.stderr,
@@ -872,7 +1106,7 @@ def run_benchmarks(
             )
         finally:
             # Always unload the model after benchmarking
-            unload_model(model_name)
+            unload_model_fn(model_name)
 
         # Sleep between benchmarks (not after the last one)
         if i < len(config_paths) - 1:
@@ -981,7 +1215,14 @@ def _build_table_data(results: list[dict]) -> dict:
         key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
     )
 
-    header = ["Model", "Pass", "Hallucinations", "Bonus", "Primary", "Runtime (s)"]
+    header = [
+        "Model",
+        "Pass",
+        "Hallucinations",
+        "Bonus",
+        "Primary",
+        "Runtime (s)",
+    ]
     rows: list[list[str]] = []
 
     total_passed = 0
@@ -1003,7 +1244,16 @@ def _build_table_data(results: list[dict]) -> dict:
         if error:
             model = f"{model} (ERROR: {error})"
 
-        rows.append([model, str(passed), str(hallucinated), str(bonus), str(primary), f"{runtime:.1f}"])
+        rows.append(
+            [
+                model,
+                str(passed),
+                str(hallucinated),
+                str(bonus),
+                str(primary),
+                f"{runtime:.1f}",
+            ]
+        )
 
         total_passed += passed
         total_hallucinated += hallucinated
@@ -1011,7 +1261,14 @@ def _build_table_data(results: list[dict]) -> dict:
         total_primary += primary
         total_runtime += runtime
 
-    totals = ["Total", str(total_passed), str(total_hallucinated), str(total_bonus), str(total_primary), f"{total_runtime:.1f}"]
+    totals = [
+        "Total",
+        str(total_passed),
+        str(total_hallucinated),
+        str(total_bonus),
+        str(total_primary),
+        f"{total_runtime:.1f}",
+    ]
     return {
         "header": header,
         "rows": rows,
@@ -1368,7 +1625,9 @@ def generate_html_table(
     header_cells = []
     for i, h in enumerate(header):
         width = col_widths_px[i]
-        header_cells.append(f'<th data-column="{i}" style="width: {width}px;">{h}</th>')
+        header_cells.append(
+            f'<th data-column="{i}" style="width: {width}px;">{h}</th>'
+        )
 
     new_tbody = "\n".join(html_rows)
     new_total = f"\n{html_total}\n"
@@ -1377,7 +1636,7 @@ def generate_html_table(
 
     if save_path.exists():
         existing = save_path.read_text()
-        marker_start = "<tbody id=\"benchmark-rows\">"
+        marker_start = '<tbody id="benchmark-rows">'
         marker_end = "</tbody><!-- BENCHMARK_ROWS_END -->"
         start_idx = existing.find(marker_start)
         end_idx = existing.find(marker_end)
@@ -1386,7 +1645,7 @@ def generate_html_table(
             thead_start = existing.find("<thead>")
             thead_end = existing.find("</thead>")
             if thead_start != -1 and thead_end != -1:
-                old_thead = existing[thead_start: thead_end + len("</thead>")]
+                old_thead = existing[thead_start : thead_end + len("</thead>")]
                 new_thead = "<thead>" + "".join(header_cells) + "</thead>"
                 existing = existing.replace(old_thead, new_thead)
 
@@ -1396,17 +1655,12 @@ def generate_html_table(
 
             before = existing[: start_idx + len(marker_start)]
             after = existing[end_idx:]
-            html_content = (
-                before
-                + new_tbody
-                + new_total
-                + after
-            )
+            html_content = before + new_tbody + new_total + after
             # Append the sorting script at the end of the body
             html_content = html_content.rstrip() + "\n    </body>\n</html>"
             html_content = html_content.replace(
                 "</html>",
-                '''    <script>
+                """    <script>
     (function() {
         let sortCol = -1;
         let sortAsc = true;
@@ -1476,7 +1730,7 @@ def generate_html_table(
         });
     }})();
 </script>
-</html>''',
+</html>""",
                 1,
             )
         else:
@@ -1518,9 +1772,18 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
+    # Parse comma-delimited runners
+    runners: list[str] = [
+        r.strip() for r in args.runner.split(",") if r.strip()
+    ]
+    if not runners:
+        print("No runners specified.", file=sys.stderr)
+        return 1
+
     print("=" * 60)
-    print("  Benchmark Suite — LMStudio Model Orchestrator")
+    print("  Benchmark Suite — Multi-Runner Orchestrator")
     print("=" * 60)
+    print(f"  Runners:         {', '.join(runners)}")
     print(f"  Corpus:          {args.corpus}")
     print(f"  Min size (B):    {args.min_size or '(all)'}")
     print(f"  Corpora dir:     {args.corpora_dir}")
@@ -1531,10 +1794,22 @@ def main() -> int:
     print(f"  Save table:      {args.save_table}")
     print(f"  Cooldown (s):    {args.cooldown_seconds}")
     print(f"  Timeout (s):     {args.timeout}")
-    includes_list = [k.strip() for k in args.includes.split(",") if k.strip()] if args.includes else []
-    excludes_list = [k.strip() for k in args.excludes.split(",") if k.strip()] if args.excludes else []
-    print(f"  Includes:        {', '.join(includes_list) if includes_list else '(all)'}")
-    print(f"  Excludes:        {', '.join(excludes_list) if excludes_list else '(none)'}")
+    includes_list = (
+        [k.strip() for k in args.includes.split(",") if k.strip()]
+        if args.includes
+        else []
+    )
+    excludes_list = (
+        [k.strip() for k in args.excludes.split(",") if k.strip()]
+        if args.excludes
+        else []
+    )
+    print(
+        f"  Includes:        {', '.join(includes_list) if includes_list else '(all)'}"
+    )
+    print(
+        f"  Excludes:        {', '.join(excludes_list) if excludes_list else '(none)'}"
+    )
     print("=" * 60)
 
     # Handle --clean-run: create initial marker files and delete corpus results
@@ -1558,135 +1833,181 @@ def main() -> int:
                     f.unlink()
                     removed += 1
                     print(f"  Removed: {f}")
-            print(f"  Removed {removed} result file(s) for corpus '{args.corpus}'.")
+            print(
+                f"  Removed {removed} result file(s) for corpus '{args.corpus}'."
+            )
 
-    try:
-        # Step 1: Discover models
-        print("\n[1/7] Discovering LMStudio models...")
-        models = discover_models()
+    all_results: list[dict] = []
 
-        # Apply --includes filter
-        if includes_list:
-            filtered = []
-            for m in models:
-                m_lower = m.lower()
-                if any(kw in m_lower for kw in includes_list):
-                    filtered.append(m)
-            models = filtered
+    for runner in runners:
+        runner_label = "Ollama" if runner == "ollama" else "LMStudio"
+        discover_cmd = "ollama ls" if runner == "ollama" else "lms ls"
+
+        print("\n" + "=" * 60)
+        print(f"  Runner: {runner_label}")
+        print("=" * 60)
+
+        try:
+            # Step 1: Discover models
+            print(
+                f"\n[1/7] Discovering {runner_label} models via `{discover_cmd}`..."
+            )
+            models = discover_models(runner=runner)
+
             if not models:
                 print(
-                    f"No models match includes {[', '.join(includes_list)]}.",
+                    f"  No models found via `{discover_cmd}`; skipping {runner_label}.",
                     file=sys.stderr,
                 )
-                return 1
+                continue
 
-        # Apply --excludes filter
-        if excludes_list:
-            filtered = []
-            for m in models:
-                m_lower = m.lower()
-                if not any(kw in m_lower for kw in excludes_list):
-                    filtered.append(m)
-            models = filtered
-            if not models:
-                print(
-                    f"All models excluded by {[', '.join(excludes_list)]}.",
-                    file=sys.stderr,
-                )
-                return 1
-
-        # Apply --min-size filter based on PARAMS from `lms ls`
-        min_size = parse_min_size(args.min_size)
-        if min_size is not None:
-            # Use discover_models_with_params to get PARAMS values from lms ls output
-            models_with_params = discover_models_with_params()
-            filtered = []
-            for model_name, params_str in models_with_params:
-                if model_name not in models:
-                    continue
-                parsed_params = parse_params_value(params_str)
-                if parsed_params is not None and parsed_params >= min_size:
-                    filtered.append(model_name)
-                elif parsed_params is None:
-                    # If no params from lms ls, include it (can't filter)
+            # Apply --includes filter
+            if includes_list:
+                filtered = []
+                for m in models:
+                    m_lower = m.lower()
+                    if any(kw in m_lower for kw in includes_list):
+                        filtered.append(m)
+                models = filtered
+                if not models:
                     print(
-                        f"  WARNING: No PARAMS value for {model_name} in `lms ls` output, including by default.",
+                        f"  No models match includes {[', '.join(includes_list)]}; skipping {runner_label}.",
                         file=sys.stderr,
                     )
-                    filtered.append(model_name)
-            models = filtered
-            if not models:
-                print(
-                    f"No models meet the --min-size {args.min_size} threshold.",
-                    file=sys.stderr,
-                )
+                    continue
+
+            # Apply --excludes filter
+            if excludes_list:
+                filtered = []
+                for m in models:
+                    m_lower = m.lower()
+                    if not any(kw in m_lower for kw in excludes_list):
+                        filtered.append(m)
+                models = filtered
+                if not models:
+                    print(
+                        f"  All models excluded by {[', '.join(excludes_list)]}; skipping {runner_label}.",
+                        file=sys.stderr,
+                    )
+                    continue
+
+            # Apply --min-size filter based on PARAMS from `lms ls` / `ollama ls`
+            min_size = parse_min_size(args.min_size)
+            if min_size is not None:
+                # Use discover_models_with_params to get PARAMS values
+                models_with_params = discover_models_with_params(runner=runner)
+                filtered = []
+                for model_name, params_str in models_with_params:
+                    if model_name not in models:
+                        continue
+                    parsed_params = parse_params_value(params_str)
+                    if parsed_params is not None and parsed_params >= min_size:
+                        filtered.append(model_name)
+                    elif parsed_params is None:
+                        # If no params from ls, include it (can't filter)
+                        ls_cmd = "ollama ls" if runner == "ollama" else "lms ls"
+                        print(
+                            f"  WARNING: No PARAMS value for {model_name} in `{ls_cmd}` output, including by default.",
+                            file=sys.stderr,
+                        )
+                        filtered.append(model_name)
+                models = filtered
+                if not models:
+                    print(
+                        f"  No models meet the --min-size {args.min_size} threshold; skipping {runner_label}.",
+                        file=sys.stderr,
+                    )
+                    continue
+            print(f"  Found {len(models)} model(s):")
+            for m in models:
+                print(f"    - {m}")
+
+            # Step 2: Validate corpus
+            print(f"\n[2/7] Validating corpus '{args.corpus}'...")
+            validate_corpus(args.corpus, args.corpora_dir)
+            print("  Corpus resolved OK.")
+
+            # Step 3: Generate user config TOMLs
+            print("\n[3/7] Generating user config TOMLs...")
+            config_paths = generate_user_configs(
+                models=models,
+                template_dir=args.template_dir,
+                user_models_dir=args.user_models_dir,
+                dry_run=args.dry_run,
+                runner=runner,
+            )
+
+            if not config_paths:
+                print("No configs generated. Exiting.", file=sys.stderr)
                 return 1
-        print(f"  Found {len(models)} model(s):")
-        for m in models:
-            print(f"    - {m}")
 
-        # Step 2: Validate corpus
-        print(f"\n[2/7] Validating corpus '{args.corpus}'...")
-        validate_corpus(args.corpus, args.corpora_dir)
-        print("  Corpus resolved OK.")
+            # Step 3.5: Unload all loaded models so we always load one at a time
+            print("\n[3.5/7] Unloading all loaded models...")
+            if runner == "ollama":
+                unloaded = ollama_unload_all_loaded()
+            else:
+                unloaded = unload_all_loaded()
+            if unloaded:
+                print(
+                    f"  Unloaded {len(unloaded)} model(s) to ensure clean state."
+                )
+            else:
+                print("  No models were loaded (clean state).")
 
-        # Step 3: Generate user config TOMLs
-        print("\n[3/7] Generating user config TOMLs...")
-        config_paths = generate_user_configs(
-            models=models,
-            template_dir=args.template_dir,
-            user_models_dir=args.user_models_dir,
-            dry_run=args.dry_run,
-        )
+            # Step 4: Run benchmarks (with per-model load/unload)
+            print("\n[4/7] Running benchmarks...")
+            benchmark_results = run_benchmarks(
+                config_paths=config_paths,
+                corpus=args.corpus,
+                cooldown_seconds=args.cooldown_seconds,
+                dry_run=args.dry_run,
+                subprocess_timeout=args.timeout,
+                runner=runner,
+            )
 
-        if not config_paths:
-            print("No configs generated. Exiting.", file=sys.stderr)
+            # Step 5: Parse results from JSON dump files (if any were generated)
+            print("\n[5/7] Parsing benchmark results...")
+            parsed_results = parse_results_from_files(
+                args.corpus, args.user_models_dir, Path("results")
+            )
+
+            # Merge parsed results with benchmark results (by config_path)
+            benchmark_results = merge_results(parsed_results, benchmark_results)
+
+            # Collect results for this runner
+            all_results.extend(benchmark_results)
+
+            # Step 6: Generate Markdown table
+            print("\n[6/7] Generating Markdown results table...")
+            generate_markdown_table(
+                benchmark_results, args.save_table, args.corpus
+            )
+
+            # Step 6b: Generate HTML table
+            html_table_path = args.save_table.with_suffix(".html")
+            print("\n[6b/7] Generating HTML results table...")
+            generate_html_table(benchmark_results, html_table_path, args.corpus)
+
+            # Step 7: Run visualization (if not dry-run)
+            if not args.dry_run:
+                print("\n[7/7] Generating visual report...")
+                run_visualization()
+
+        except BenchmarkError as e:
+            print(f"\nERROR: {e}", file=sys.stderr)
             return 1
 
-        # Step 3.5: Unload all loaded models so we always load one at a time
-        print("\n[3.5/7] Unloading all loaded models...")
-        unloaded = unload_all_loaded()
-        if unloaded:
-            print(f"  Unloaded {len(unloaded)} model(s) to ensure clean state.")
-        else:
-            print("  No models were loaded (clean state).")
+    # Generate consolidated results table across all runners
+    if all_results:
+        print("\n" + "=" * 60)
+        print("  Consolidated Results (All Runners)")
+        print("=" * 60)
+        print("\n[Final] Generating consolidated Markdown results table...")
+        generate_markdown_table(all_results, args.save_table, args.corpus)
 
-        # Step 4: Run benchmarks (with per-model load/unload)
-        print("\n[4/7] Running benchmarks...")
-        benchmark_results = run_benchmarks(
-            config_paths=config_paths,
-            corpus=args.corpus,
-            cooldown_seconds=args.cooldown_seconds,
-            dry_run=args.dry_run,
-            subprocess_timeout=args.timeout,
-        )
-
-        # Step 5: Parse results from JSON dump files (if any were generated)
-        print("\n[5/7] Parsing benchmark results...")
-        parsed_results = parse_results_from_files(
-            args.corpus, args.user_models_dir, Path("results")
-        )
-
-        # Merge parsed results with benchmark results (by config_path)
-        benchmark_results = merge_results(parsed_results, benchmark_results)
-
-        # Step 6: Generate Markdown table
-        print("\n[6/7] Generating Markdown results table...")
-        generate_markdown_table(benchmark_results, args.save_table, args.corpus)
-
-        # Step 6b: Generate HTML table
         html_table_path = args.save_table.with_suffix(".html")
-        print("\n[6b/7] Generating HTML results table...")
-        generate_html_table(benchmark_results, html_table_path, args.corpus)
-
-        # Step 7: Run visualization (if not dry-run)
-        if not args.dry_run:
-            print("\n[7/7] Generating visual report...")
-            run_visualization()
-
-    except BenchmarkError as e:
-        print(f"\nERROR: {e}", file=sys.stderr)
-        return 1
+        print("\n[Final] Generating consolidated HTML results table...")
+        generate_html_table(all_results, html_table_path, args.corpus)
 
     print("\n" + "=" * 60)
     print("  Done!")

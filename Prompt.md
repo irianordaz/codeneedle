@@ -10,3 +10,4 @@
 * Execute all Python code using the pixi environment with the command 'pixi run python'.
 * Create a Markdown file with a table containing the pass, hallucinations, and bonus, and total runtime for each model that was executed in this script. Place the models as rows and pass, hallucinations, and bonus as columns.
 * Test with a small model like mlx-community/qwen3.6-35b-a3b`.
+* Update to allow an identical benchmack capability with ollama as we have with lmstudio. You can use 'ollama ls' to gather all the models available in ollama. Add a new CLI argument --runner to specify whether to benchmark lmstudio or ollama.
