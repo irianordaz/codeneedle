@@ -568,8 +568,8 @@ def ollama_load_model(model_name: str) -> bool:
 
 
 def ollama_unload_model(model_name: str) -> bool:
-    """Unload (delete) a model from Ollama. Returns True on success."""
-    cmd = ["ollama", "rm", model_name]
+    """Unload a model from Ollama memory. Returns True on success."""
+    cmd = ["ollama", "stop", model_name]
     try:
         result = subprocess.run(
             cmd,
@@ -948,6 +948,7 @@ def run_benchmarks(
       - bonus: total bonus matched lines
       - runtime: total runtime in seconds
       - error: error message if the benchmark failed
+      - runner: name of the runner used (lmstudio / ollama)
     """
     results: list[dict] = []
 
@@ -990,6 +991,7 @@ def run_benchmarks(
                     "bonus": 0,
                     "runtime": 0.0,
                     "error": None,
+                    "runner": runner,
                 }
             )
             continue
@@ -1008,6 +1010,7 @@ def run_benchmarks(
                     "bonus": 0,
                     "runtime": 0.0,
                     "error": "model load failed",
+                    "runner": runner,
                 }
             )
             # Sleep between benchmarks (not after the last one)
