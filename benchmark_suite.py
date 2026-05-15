@@ -246,6 +246,20 @@ def read_toml_field(content: str, field: str) -> str | None:
     return None
 
 
+def determine_runner_from_toml(toml_path: Path) -> str:
+    """Infer the runner (ollama or lmstudio) from a model TOML's base_url.
+
+    Ollama's default API port is 11434; LMStudio's is 1234. Falls back to
+    "lmstudio" when the file is missing or the base_url is unrecognised.
+    """
+    if not toml_path.is_file():
+        return "lmstudio"
+    base_url = read_toml_field(toml_path.read_text(), "base_url") or ""
+    if "11434" in base_url:
+        return "ollama"
+    return "lmstudio"
+
+
 def parse_lms_ls(output: str) -> list[tuple[str, str | None]]:
     """Parse the output of `lms ls` to extract model names and PARAMS values.
 
@@ -517,6 +531,26 @@ def parse_ollama_ls(output: str) -> list[tuple[str, str | None]]:
             models.append((model_name, size))
 
     return models
+
+
+def ollama_show_params(model_name: str) -> str | None:
+    """Get the parameters value for an Ollama model via `ollama show`.
+
+    Parses the `parameters` field under the `Model` section (e.g. "27.4B").
+    Returns the raw string (e.g. "27.4B") or None if the command fails or
+    the field is missing.
+    """
+    try:
+        result = run_subprocess(["ollama", "show", model_name])
+    except FileNotFoundError:
+        return None
+    if result.returncode != 0:
+        return None
+    for line in result.stdout.splitlines():
+        match = re.match(r"\s*parameters\s+(\S+)", line, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
 
 
 def parse_ollama_ps(output: str) -> list[str]:
@@ -831,7 +865,12 @@ def discover_models_with_params_lmstudio() -> list[tuple[str, str | None]]:
 
 
 def discover_models_with_params_ollama() -> list[tuple[str, str | None]]:
-    """Discover all installed models via `ollama ls`, returning (model_name, params) tuples."""
+    """Discover all installed models via `ollama ls`, returning (model_name, params) tuples.
+
+    `ollama ls` only exposes the on-disk size (e.g. "19 GB"), which is not the
+    parameter count. To support `--min-size` filtering we look up each model
+    via `ollama show` and parse the `parameters` field (e.g. "27.4B").
+    """
     try:
         result = run_subprocess(["ollama", "ls"])
     except FileNotFoundError:
@@ -850,7 +889,10 @@ def discover_models_with_params_ollama() -> list[tuple[str, str | None]]:
             "No models found via 'ollama ls'. Install a model with 'ollama pull' first."
         )
 
-    return parsed
+    enriched: list[tuple[str, str | None]] = []
+    for model_name, _ in parsed:
+        enriched.append((model_name, ollama_show_params(model_name)))
+    return enriched
 
 
 def generate_user_configs(
@@ -1159,15 +1201,17 @@ def parse_results_from_files(
             else json_file.stem
         )
 
+        config_path = user_models_dir / f"{model_stem}.toml"
         parsed_results.append(
             {
-                "config_path": user_models_dir / f"{model_stem}.toml",
+                "config_path": config_path,
                 "passed": passed,
                 "hallucinated": hallucinated,
                 "bonus": bonus,
                 "primary_matched": primary_matched,
                 "runtime": runtime,
                 "error": None,
+                "runner": determine_runner_from_toml(config_path),
             }
         )
 
@@ -1220,6 +1264,7 @@ def _build_table_data(results: list[dict]) -> dict:
 
     header = [
         "Model",
+        "Runner",
         "Pass",
         "Hallucinations",
         "Bonus",
@@ -1237,6 +1282,11 @@ def _build_table_data(results: list[dict]) -> dict:
     for r in sorted_results:
         config_path = r.get("config_path", Path("unknown"))
         model = config_path.stem
+        runner = r.get("runner")
+        if not runner and isinstance(config_path, Path):
+            runner = determine_runner_from_toml(config_path)
+        if not runner:
+            runner = "lmstudio"
         passed = r.get("passed", 0)
         hallucinated = r.get("hallucinated", 0)
         bonus = r.get("bonus", 0)
@@ -1250,6 +1300,7 @@ def _build_table_data(results: list[dict]) -> dict:
         rows.append(
             [
                 model,
+                runner,
                 str(passed),
                 str(hallucinated),
                 str(bonus),
@@ -1266,6 +1317,7 @@ def _build_table_data(results: list[dict]) -> dict:
 
     totals = [
         "Total",
+        "",
         str(total_passed),
         str(total_hallucinated),
         str(total_bonus),
@@ -1347,9 +1399,19 @@ def generate_markdown_table(
         end_idx = existing.find(marker_end)
 
         if start_idx != -1 and end_idx != -1:
-            before = existing[: start_idx + len(marker_start)]
+            header_line = _fmt_row(header)
+            separator_line = _fmt_separator()
+            outer_preamble = (
+                f"<!-- Corpus: {corpus} -->"
+                + "\n\n"
+                + header_line
+                + "\n"
+                + separator_line
+                + "\n"
+                + marker_start
+            )
             after = existing[end_idx:]
-            table_content = before + new_block + after
+            table_content = outer_preamble + new_block + after
         else:
             # No markers yet — build complete table with markers
             header_line = _fmt_row(header)
