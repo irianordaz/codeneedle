@@ -11,3 +11,6 @@
 * Create a Markdown file with a table containing the pass, hallucinations, and bonus, and total runtime for each model that was executed in this script. Place the models as rows and pass, hallucinations, and bonus as columns.
 * Test with a small model like mlx-community/qwen3.6-35b-a3b`.
 * Update to allow an identical benchmack capability with ollama as we have with lmstudio. You can use 'ollama ls' to gather all the models available in ollama. Add a new CLI argument --runner to specify whether to benchmark lmstudio or ollama.
+* Add a column to the results table to include the name of the runner for each model. If the user is running benchmark_suite without --clean-run meaning the user wants to add results to an existing table then parse the model toml files and identify if the model is an ollama or lmstudio model and update the results table if the runner column value is not there.
+* Executing 'pixi run python benchmark_suite.py --corpus python --runner ollama --min-size 25' returns 'No models meet the --min-size 25 threshold; skipping Ollama.'
+Use 'ollama show <model name>, where <model name> is the name returned with 'ollama ls', then check the 'parameters' value to fiter based on --min-size provided by the user.
