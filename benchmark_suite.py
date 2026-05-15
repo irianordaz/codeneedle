@@ -697,8 +697,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runner",
         type=str,
-        default="lmstudio",
-        help="Model runner(s) to benchmark, comma-delimited (default: lmstudio). "
+        default="ollama,lmstudio",
+        help="Model runner(s) to benchmark, comma-delimited (default: ollama,lmstudio). "
         "Choices: lmstudio, ollama. Example: --runner lmstudio,ollama",
     )
     parser.add_argument(
