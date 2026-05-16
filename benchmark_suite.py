@@ -1338,21 +1338,9 @@ def _build_table_data(results: list[dict]) -> dict:
         total_runtime += runtime
         total_tokens += tokens
 
-    total_tps = total_tokens / total_runtime if total_runtime > 0 else 0.0
-    totals = [
-        "Total",
-        "",
-        str(total_passed),
-        str(total_hallucinated),
-        str(total_bonus),
-        str(total_primary),
-        f"{total_runtime:.1f}",
-        f"{total_tps:.1f}" if total_tps else "-",
-    ]
     return {
         "header": header,
         "rows": rows,
-        "totals": totals,
         "corpus": "",
     }
 
@@ -1372,15 +1360,12 @@ def generate_markdown_table(
 
     header = data["header"]
     rows = data["rows"]
-    totals = data["totals"]
 
     # Compute max width per column
     col_widths = [len(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
             col_widths[i] = max(col_widths[i], len(cell))
-    for i, cell in enumerate(totals):
-        col_widths[i] = max(col_widths[i], len(cell))
 
     def _fmt_row(labels: list[str], bold: bool = False) -> str:
         parts = []
@@ -1409,7 +1394,6 @@ def generate_markdown_table(
     for row in rows:
         new_block_lines.append(_fmt_row(row))
 
-    new_block_lines.append(_fmt_row(totals, bold=True))
     new_block_lines.append("")
 
     new_block = "\n".join(new_block_lines)
@@ -1479,20 +1463,10 @@ def _build_full_html(
     header: list[str],
     header_cells: list[str],
     html_rows: list[str],
-    totals: list[str],
     col_widths_px: list[int],
     corpus: str,
 ) -> str:
     """Build a complete HTML file from scratch."""
-    total_cells = []
-    for i, cell in enumerate(totals):
-        width = col_widths_px[i]
-        total_cells.append(
-            f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
-            f'font-weight: bold; border-top: 2px solid #333;">**{cell}**</td>'
-        )
-    html_total = "<tr>" + "".join(total_cells) + "</tr>"
-
     title = f"Results Table{f' — {corpus}' if corpus else ''}"
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1586,7 +1560,6 @@ def _build_full_html(
             </thead>
             <tbody id="benchmark-rows">
 {"".join(html_rows)}
-{html_total}
             </tbody><!-- BENCHMARK_ROWS_END -->
         </table>
     </div>
@@ -1606,7 +1579,6 @@ def _build_full_html(
             if (!tbody) return;
 
             const rows = Array.from(tbody.querySelectorAll("tr"));
-            const totalRow = rows.pop();
 
             if (colIndex === sortCol) {{
                 sortAsc = !sortAsc;
@@ -1635,7 +1607,6 @@ def _build_full_html(
             }});
 
             tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
-            tbody.appendChild(totalRow);
 
             document.querySelectorAll("thead th").forEach((th, i) => {{
                 th.classList.remove("active-sort");
@@ -1679,15 +1650,12 @@ def generate_html_table(
 
     header = data["header"]
     rows = data["rows"]
-    totals = data["totals"]
 
     # Compute column widths for consistent styling
     col_widths = [len(h) for h in header]
     for row in rows:
         for i, cell in enumerate(row):
             col_widths[i] = max(col_widths[i], len(cell))
-    for i, cell in enumerate(totals):
-        col_widths[i] = max(col_widths[i], len(cell))
 
     # Compute column widths in pixels (rough estimate: 8px per char + padding)
     col_widths_px = [max(w * 8 + 20, 80) for w in col_widths]
@@ -1703,15 +1671,6 @@ def generate_html_table(
             )
         html_rows.append("<tr>" + "".join(cells) + "</tr>")
 
-    total_cells = []
-    for i, cell in enumerate(totals):
-        width = col_widths_px[i]
-        total_cells.append(
-            f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
-            f'font-weight: bold; border-top: 2px solid #333;">**{cell}**</td>'
-        )
-    html_total = "<tr>" + "".join(total_cells) + "</tr>"
-
     header_cells = []
     for i, h in enumerate(header):
         width = col_widths_px[i]
@@ -1720,7 +1679,6 @@ def generate_html_table(
         )
 
     new_tbody = "\n".join(html_rows)
-    new_total = f"\n{html_total}\n"
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1745,7 +1703,7 @@ def generate_html_table(
 
             before = existing[: start_idx + len(marker_start)]
             after = existing[end_idx:]
-            html_content = before + new_tbody + new_total + after
+            html_content = before + new_tbody + after
             # Append the sorting script at the end of the body
             html_content = html_content.rstrip() + "\n    </body>\n</html>"
             html_content = html_content.replace(
@@ -1766,7 +1724,6 @@ def generate_html_table(
             if (!tbody) return;
 
             const rows = Array.from(tbody.querySelectorAll("tr"));
-            const totalRow = rows.pop();
 
             if (colIndex === sortCol) {
                 sortAsc = !sortAsc;
@@ -1795,7 +1752,6 @@ def generate_html_table(
             });
 
             tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
-            tbody.appendChild(totalRow);
 
             document.querySelectorAll("thead th").forEach((th, i) => {
                 th.classList.remove("active-sort");
@@ -1825,11 +1781,11 @@ def generate_html_table(
             )
         else:
             html_content = _build_full_html(
-                header, header_cells, html_rows, totals, col_widths_px, corpus
+                header, header_cells, html_rows, col_widths_px, corpus
             )
     else:
         html_content = _build_full_html(
-            header, header_cells, html_rows, totals, col_widths_px, corpus
+            header, header_cells, html_rows, col_widths_px, corpus
         )
 
     save_path.write_text(html_content)
