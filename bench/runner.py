@@ -10,6 +10,7 @@ from .client import ClientConfig, chat_complete
 from .extract import Source, extract, load_source_glob, stratified_sample
 from .report import render_function, render_summary
 from .scorer import FunctionScore, score
+from .tokens import count_tokens
 
 
 # Keeping the file FIRST and the tiny task suffix LAST is deliberate:
@@ -60,6 +61,7 @@ class _Run:
     prompt_chars: int
     response: str
     latency_s: float
+    completion_tokens: int = 0
     error: str | None = None
 
 
@@ -105,11 +107,6 @@ def _preflight_context_check(prompt: str, cfg: ClientConfig) -> str | None:
         return None
     except Exception as e:
         return str(e)
-
-
-def _is_context_error(msg: str) -> bool:
-    m = msg.lower()
-    return any(s in m for s in ("context length", "n_ctx", "n_keep", "too long", "exceeds"))
 
 
 def run_benchmark(
@@ -195,28 +192,42 @@ def run_benchmark(
         )
         start = time.monotonic()
         request_error: str | None = None
+        usage: dict[str, int] | None = None
         try:
-            resp = chat_complete(cfg, system=None, user=prompt)
+            content, usage = chat_complete(cfg, system=None, user=prompt)
         except Exception as e:
             request_error = str(e)
             print(f"  ERROR: {request_error}", flush=True)
-            resp = ""
+            content = ""
         latency = time.monotonic() - start
-        print(f"  response: {len(resp)} chars in {latency:.1f}s", flush=True)
+
+        # Prefer the server-reported completion-token count (uses the model's
+        # real tokenizer); fall back to tiktoken on the response text.
+        completion_tokens = 0
+        if usage and isinstance(usage.get("completion_tokens"), int):
+            completion_tokens = usage["completion_tokens"]
+        elif content:
+            completion_tokens = count_tokens(content)
+        tok_per_s = completion_tokens / latency if latency > 0 else 0.0
+        print(
+            f"  response: {len(content)} chars, {completion_tokens} tokens "
+            f"in {latency:.1f}s ({tok_per_s:.1f} tok/s)",
+            flush=True,
+        )
 
         # Empty content with no exception = HTTP 200 but the model produced
         # nothing. On reasoning models that's typically the CoT eating the
         # entire max_tokens budget. Treat as a non-recall error so it shows
         # as ERROR, not FAIL.
         score_error = request_error
-        if resp.strip() == "" and score_error is None:
+        if content.strip() == "" and score_error is None:
             score_error = (
                 "empty response (200 OK but no content; reasoning models often need "
                 "more max_tokens — try --max-tokens 8000)"
             )
             print(f"  ⚠ {score_error}", flush=True)
 
-        sc = score(t.name, t.primary_lines, t.bonus_lines, resp, relax_indent=relax_indent)
+        sc = score(t.name, t.primary_lines, t.bonus_lines, content, relax_indent=relax_indent)
         if score_error:
             sc.error = score_error
         scores.append(sc)
@@ -225,8 +236,9 @@ def run_benchmark(
                 function=t.name,
                 source_path=str(t.source_path) if t.source_path else None,
                 prompt_chars=len(prompt),
-                response=resp,
+                response=content,
                 latency_s=latency,
+                completion_tokens=completion_tokens,
                 error=score_error,
             )
         )
@@ -293,6 +305,7 @@ def run_benchmark(
                     "bonus_matched": sc.bonus_matched,
                     "latency_s": r.latency_s,
                     "prompt_chars": r.prompt_chars,
+                    "completion_tokens": r.completion_tokens,
                     "response": r.response,
                 }
                 for sc, r in zip(scores, runs)

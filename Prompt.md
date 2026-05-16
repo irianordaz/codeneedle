@@ -14,3 +14,4 @@
 * Add a column to the results table to include the name of the runner for each model. If the user is running benchmark_suite without --clean-run meaning the user wants to add results to an existing table then parse the model toml files and identify if the model is an ollama or lmstudio model and update the results table if the runner column value is not there.
 * Executing 'pixi run python benchmark_suite.py --corpus python --runner ollama --min-size 25' returns 'No models meet the --min-size 25 threshold; skipping Ollama.'
 Use 'ollama show <model name>, where <model name> is the name returned with 'ollama ls', then check the 'parameters' value to fiter based on --min-size provided by the user.
+* Add a calculation for the total tokens per second for each model and add it to the results table as a new column.

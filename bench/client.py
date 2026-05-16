@@ -23,7 +23,9 @@ class ClientConfig:
     use_max_completion_tokens: bool = False  # send `max_completion_tokens` instead of `max_tokens` (required by OpenAI GPT-5 family)
 
 
-def chat_complete(cfg: ClientConfig, system: str | None, user: str) -> str:
+def chat_complete(
+    cfg: ClientConfig, system: str | None, user: str
+) -> tuple[str, dict[str, int] | None]:
     messages: list[dict] = []
     if system:
         messages.append({"role": "system", "content": system})
@@ -58,4 +60,8 @@ def chat_complete(cfg: ClientConfig, system: str | None, user: str) -> str:
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:500]}")
         data = r.json()
-    return data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage")
+    if usage is not None:
+        usage = {k: int(v) for k, v in usage.items()}
+    return content, usage

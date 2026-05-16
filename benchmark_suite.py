@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+from bench.tokens import count_tokens
+
 # ---------------------------------------------------------------------------
 # Defaults
 # ---------------------------------------------------------------------------
@@ -1192,6 +1194,19 @@ def parse_results_from_files(
         primary_matched = sum(r.get("primary_matched", 0) for r in results)
         runtime = sum(r.get("latency_s", 0.0) for r in results)
 
+        # `completion_tokens` is written by newer runner.py dumps. Older dumps
+        # only have the raw response text, so count retro-actively with tiktoken
+        # — same encoder, comparable across rows.
+        completion_tokens = 0
+        for r in results:
+            tokens = r.get("completion_tokens")
+            if tokens is None:
+                tokens = count_tokens(r.get("response", "") or "")
+            completion_tokens += int(tokens)
+        tokens_per_sec = (
+            completion_tokens / runtime if runtime > 0 else 0.0
+        )
+
         # JSON dump files are named {corpus}__{model-stem}.json.
         # Extract the model-stem (part after '__') and reconstruct
         # the config path in user_models_dir.
@@ -1210,6 +1225,8 @@ def parse_results_from_files(
                 "bonus": bonus,
                 "primary_matched": primary_matched,
                 "runtime": runtime,
+                "completion_tokens": completion_tokens,
+                "tokens_per_sec": tokens_per_sec,
                 "error": None,
                 "runner": determine_runner_from_toml(config_path),
             }
@@ -1270,6 +1287,7 @@ def _build_table_data(results: list[dict]) -> dict:
         "Bonus",
         "Primary",
         "Runtime (s)",
+        "Tokens/s",
     ]
     rows: list[list[str]] = []
 
@@ -1278,6 +1296,7 @@ def _build_table_data(results: list[dict]) -> dict:
     total_bonus = 0
     total_primary = 0
     total_runtime = 0.0
+    total_tokens = 0
 
     for r in sorted_results:
         config_path = r.get("config_path", Path("unknown"))
@@ -1292,6 +1311,8 @@ def _build_table_data(results: list[dict]) -> dict:
         bonus = r.get("bonus", 0)
         primary = r.get("primary_matched", 0)
         runtime = r.get("runtime", 0.0)
+        tokens = r.get("completion_tokens", 0)
+        tokens_per_sec = r.get("tokens_per_sec", 0.0)
         error = r.get("error")
 
         if error:
@@ -1306,6 +1327,7 @@ def _build_table_data(results: list[dict]) -> dict:
                 str(bonus),
                 str(primary),
                 f"{runtime:.1f}",
+                f"{tokens_per_sec:.1f}" if tokens_per_sec else "-",
             ]
         )
 
@@ -1314,7 +1336,9 @@ def _build_table_data(results: list[dict]) -> dict:
         total_bonus += bonus
         total_primary += primary
         total_runtime += runtime
+        total_tokens += tokens
 
+    total_tps = total_tokens / total_runtime if total_runtime > 0 else 0.0
     totals = [
         "Total",
         "",
@@ -1323,6 +1347,7 @@ def _build_table_data(results: list[dict]) -> dict:
         str(total_bonus),
         str(total_primary),
         f"{total_runtime:.1f}",
+        f"{total_tps:.1f}" if total_tps else "-",
     ]
     return {
         "header": header,
