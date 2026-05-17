@@ -1,18 +1,46 @@
 #!/usr/bin/env python3
 """Benchmark suite orchestrator for LMStudio, Ollama, and llama.cpp models.
 
-Discovers all models via `lms ls`, `ollama ls`, or a scan of
-`~/.lmstudio/models` for `.gguf` files (llama.cpp), creates per-model config
-TOMLs from templates in `configs/models/`, runs benchmarks sequentially with
-configurable pauses, produces a Markdown results table (with runtime and
-totals), and generates visual reports.
+Discovers models from each runner, creates per-model config TOMLs from
+templates in configs/models/, runs benchmarks sequentially with configurable
+pauses, and produces Markdown + HTML results tables with per-model runtime,
+token counts, and scores.
 
-Usage:
+Runners
+-------
+lmstudio   Discovers models via `lms ls`. Loads/unloads via `lms load/unload`.
+           Requires LM Studio with the local server running (port 1234).
+ollama     Discovers models via `ollama ls`. Loads/unloads via `ollama pull/stop`.
+           Requires Ollama running (port 11434).
+llama.cpp  Discovers *.gguf files under ~/.lmstudio/models (skipping mmproj
+           projector files). Spawns a llama-server process per model on port
+           8080 using all available GPU layers (-ngl 999).
+
+By default all three runners are used. Pass --runner to restrict to one or more.
+
+Usage
+-----
+# Run all runners against the http_server corpus:
     pixi run python benchmark_suite.py --corpus http_server
-    pixi run python benchmark_suite.py --corpus jquery --min-size 25B
-    pixi run python benchmark_suite.py --corpus jquery --dry-run
-    pixi run python benchmark_suite.py --corpus http_server --runner ollama
-    pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp
+
+# Run only llama.cpp models, skipping anything smaller than 25 B parameters:
+    pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp --min-size 25B
+
+# Run only Qwen models across all runners (case-insensitive):
+    pixi run python benchmark_suite.py --corpus http_server --includes qwen
+
+# For llama.cpp, --includes/--excludes match against the full path under
+# ~/.lmstudio/models, so directory names are searchable too:
+    pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp --includes MTP
+
+# Preview what would run without executing anything:
+    pixi run python benchmark_suite.py --corpus http_server --dry-run
+
+# Rebuild the results table from existing JSON dumps without re-running models:
+    pixi run python benchmark_suite.py --corpus http_server --recreate-table
+
+# Wipe previous results for this corpus, then run fresh:
+    pixi run python benchmark_suite.py --corpus http_server --clean-run
 """
 
 from __future__ import annotations
@@ -788,6 +816,28 @@ def _resolve_gguf_path(
     return None
 
 
+def _model_filter_str(
+    model_name: str,
+    runner: str,
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+) -> str:
+    """Return the string to match --includes/--excludes against.
+
+    For llama.cpp the short stem alone misses keywords that live in parent
+    directory names (e.g. "MTP" in "unsloth/Qwen3.6-27B-MTP-GGUF/…").
+    Resolving to the full relative path makes every path component searchable.
+    For other runners the model name already contains all relevant tokens.
+    """
+    if runner == "llama.cpp":
+        path = _resolve_gguf_path(model_name, models_dir)
+        if path is not None:
+            try:
+                return str(path.relative_to(models_dir))
+            except ValueError:
+                return str(path)
+    return model_name
+
+
 def llamacpp_load_model(
     model_id: str,
     models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
@@ -955,7 +1005,23 @@ def verify_model_loaded(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Benchmark suite orchestrator for LMStudio and Ollama models.",
+        description=(
+            "Benchmark suite orchestrator for LMStudio, Ollama, and llama.cpp models. "
+            "Discovers models from each runner, runs bench.py sequentially, and "
+            "produces Markdown + HTML results tables."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+
+    # ---- Core ----------------------------------------------------------------
+    parser.add_argument(
+        "--corpus",
+        required=True,
+        help=(
+            "Corpus to benchmark against. Either a named config under "
+            f"{DEFAULT_CORPORA_DIR}/ (e.g. 'http_server') or a direct path to "
+            "a Python source file."
+        ),
     )
     parser.add_argument(
         "--runner",
@@ -963,97 +1029,135 @@ def build_parser() -> argparse.ArgumentParser:
         dest="runner",
         type=str,
         default="ollama,lmstudio,llama.cpp",
-        help="Model runner(s) to benchmark, comma-delimited "
-        "(default: ollama,lmstudio,llama.cpp). "
-        "Choices: lmstudio, ollama, llama.cpp. "
-        "Example: --runner lmstudio,ollama,llama.cpp",
+        help=(
+            "Comma-delimited list of runners to use "
+            "(default: ollama,lmstudio,llama.cpp). "
+            "Choices: ollama, lmstudio, llama.cpp. "
+            "Example: --runner llama.cpp,ollama"
+        ),
     )
-    parser.add_argument(
-        "--corpus",
-        required=True,
-        help="Corpus config name (e.g. 'http_server') or path to a Python source file.",
-    )
+
+    # ---- Filtering -----------------------------------------------------------
     parser.add_argument(
         "--min-size",
         type=str,
         default=None,
-        help="Only benchmark models with number_of_parameters >= this value (in billions). "
-        "Accepts values like '25B' or '25'.",
+        metavar="SIZE",
+        help=(
+            "Skip models smaller than SIZE billion parameters. "
+            "Accepts '25B', '25', '3.5B', etc. "
+            "For lmstudio/ollama the value comes from `lms ls` / `ollama show`; "
+            "for llama.cpp it is parsed from the GGUF filename."
+        ),
     )
     parser.add_argument(
-        "--corpora-dir",
-        type=Path,
-        default=DEFAULT_CORPORA_DIR,
-        help=f"Directory containing corpus TOMLs (default: {DEFAULT_CORPORA_DIR}).",
+        "--includes",
+        type=str,
+        default=None,
+        metavar="KW[,KW...]",
+        help=(
+            "Comma-delimited keywords (case-insensitive). Only models whose name "
+            "contains ANY keyword are benchmarked. For llama.cpp the full path "
+            "under ~/.lmstudio/models is searched, so directory components such "
+            "as 'MTP' or 'unsloth' are also matchable."
+        ),
     )
     parser.add_argument(
-        "--user-models-dir",
-        type=Path,
-        default=DEFAULT_USER_MODELS_DIR,
-        help=f"Directory to write user model TOMLs (default: {DEFAULT_USER_MODELS_DIR}).",
+        "--excludes",
+        type=str,
+        default=None,
+        metavar="KW[,KW...]",
+        help=(
+            "Comma-delimited keywords (case-insensitive). Models whose name "
+            "contains ANY keyword are skipped. Same path-aware matching as "
+            "--includes for llama.cpp models."
+        ),
     )
-    parser.add_argument(
-        "--template-dir",
-        type=Path,
-        default=DEFAULT_TEMPLATE_DIR,
-        help=f"Directory containing template TOMLs (default: {DEFAULT_TEMPLATE_DIR}).",
-    )
+
+    # ---- Run behaviour -------------------------------------------------------
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print what would happen without executing benchmarks.",
+        help="Print the actions that would be taken without loading models or running benchmarks.",
     )
     parser.add_argument(
         "--clean-run",
         action="store_true",
-        help="Delete existing results tables before generating new ones.",
+        help=(
+            "Delete the existing results table and all JSON result files for "
+            "the chosen corpus before starting, so the run produces a fresh table."
+        ),
     )
     parser.add_argument(
         "--recreate-table",
         "--recreate_table",
         dest="recreate_table",
         action="store_true",
-        help="Skip benchmarks and regenerate the results table from existing "
-        "JSON results in the results/ directory.",
-    )
-    parser.add_argument(
-        "--save-table",
-        type=Path,
-        default=DEFAULT_SAVE_TABLE,
-        help=f"Path to write the Markdown results table (default: {DEFAULT_SAVE_TABLE}).",
+        help=(
+            "Skip model discovery and benchmarks entirely. Re-read all existing "
+            "JSON result files in results/ for the chosen corpus and regenerate "
+            "the Markdown and HTML tables from them."
+        ),
     )
     parser.add_argument(
         "--cooldown-seconds",
         type=int,
         default=DEFAULT_COOLDOWN_SECONDS,
-        help=f"Seconds to wait between benchmarks (default: {DEFAULT_COOLDOWN_SECONDS}).",
+        metavar="N",
+        help=f"Seconds to wait between consecutive model benchmarks (default: {DEFAULT_COOLDOWN_SECONDS}).",
     )
     parser.add_argument(
         "--timeout",
         type=float,
         default=DEFAULT_SUBPROCESS_TIMEOUT,
-        help=f"Per-model subprocess timeout in seconds (default: {DEFAULT_SUBPROCESS_TIMEOUT}).",
+        metavar="SECS",
+        help=(
+            f"Maximum wall-clock seconds allowed for a single model's benchmark "
+            f"subprocess (default: {DEFAULT_SUBPROCESS_TIMEOUT})."
+        ),
     )
     parser.add_argument(
         "--load-verify-timeout",
         type=float,
         default=DEFAULT_LOAD_VERIFY_TIMEOUT,
-        help="Seconds to wait after loading a model for it to respond to a "
-        f"probe request (default: {DEFAULT_LOAD_VERIFY_TIMEOUT}). "
-        "Set to 0 to skip verification.",
+        metavar="SECS",
+        help=(
+            f"Seconds to poll the model's /v1/chat/completions endpoint after "
+            f"loading, waiting for it to become ready (default: {DEFAULT_LOAD_VERIFY_TIMEOUT}). "
+            "Set to 0 to skip verification."
+        ),
+    )
+
+    # ---- Paths ---------------------------------------------------------------
+    parser.add_argument(
+        "--save-table",
+        type=Path,
+        default=DEFAULT_SAVE_TABLE,
+        metavar="PATH",
+        help=f"Where to write the Markdown results table (default: {DEFAULT_SAVE_TABLE}). An HTML version is written alongside it.",
     )
     parser.add_argument(
-        "--includes",
-        type=str,
-        default=None,
-        help="Comma-delimited list of keywords; only models containing ANY of these keywords will be benchmarked (case-insensitive).",
+        "--corpora-dir",
+        type=Path,
+        default=DEFAULT_CORPORA_DIR,
+        metavar="DIR",
+        help=f"Directory containing corpus TOML configs (default: {DEFAULT_CORPORA_DIR}).",
     )
     parser.add_argument(
-        "--excludes",
-        type=str,
-        default=None,
-        help="Comma-delimited list of keywords; models containing ANY of these keywords will be excluded (case-insensitive).",
+        "--user-models-dir",
+        type=Path,
+        default=DEFAULT_USER_MODELS_DIR,
+        metavar="DIR",
+        help=f"Directory where per-run model TOML configs are written (default: {DEFAULT_USER_MODELS_DIR}).",
     )
+    parser.add_argument(
+        "--template-dir",
+        type=Path,
+        default=DEFAULT_TEMPLATE_DIR,
+        metavar="DIR",
+        help=f"Directory containing model template TOMLs used as a base for discovered models (default: {DEFAULT_TEMPLATE_DIR}).",
+    )
+
     return parser
 
 
@@ -2157,12 +2261,12 @@ def main() -> int:
     print(f"  Timeout (s):     {args.timeout}")
     print(f"  Load verify (s): {args.load_verify_timeout}")
     includes_list = (
-        [k.strip() for k in args.includes.split(",") if k.strip()]
+        [k.strip().lower() for k in args.includes.split(",") if k.strip()]
         if args.includes
         else []
     )
     excludes_list = (
-        [k.strip() for k in args.excludes.split(",") if k.strip()]
+        [k.strip().lower() for k in args.excludes.split(",") if k.strip()]
         if args.excludes
         else []
     )
@@ -2265,7 +2369,7 @@ def main() -> int:
             if includes_list:
                 filtered = []
                 for m in models:
-                    m_lower = m.lower()
+                    m_lower = _model_filter_str(m, runner).lower()
                     if any(kw in m_lower for kw in includes_list):
                         filtered.append(m)
                 models = filtered
@@ -2280,7 +2384,7 @@ def main() -> int:
             if excludes_list:
                 filtered = []
                 for m in models:
-                    m_lower = m.lower()
+                    m_lower = _model_filter_str(m, runner).lower()
                     if not any(kw in m_lower for kw in excludes_list):
                         filtered.append(m)
                 models = filtered
