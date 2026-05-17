@@ -723,15 +723,11 @@ def _parse_params_from_gguf_name(name: str) -> str | None:
 def _gguf_model_id(gguf_path: Path, models_dir: Path) -> str:
     """Derive a model identifier from a GGUF file path.
 
-    Uses the path relative to the models dir (without extension) so the
-    identifier is stable, human-readable, and unique. E.g.
-    "lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M".
+    Returns just the filename stem (e.g. "Qwen3.6-27B-Q4_K_M") so that
+    table rows show a short, readable model name rather than the full
+    directory hierarchy from ~/.lmstudio/models.
     """
-    try:
-        rel = gguf_path.relative_to(models_dir)
-    except ValueError:
-        rel = Path(gguf_path.name)
-    return str(rel.with_suffix(""))
+    return gguf_path.stem
 
 
 def discover_gguf_files(
@@ -785,14 +781,9 @@ def _resolve_gguf_path(
     model_id: str,
     models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
 ) -> Path | None:
-    """Map a model identifier back to its on-disk .gguf path."""
-    candidate = models_dir / f"{model_id}.gguf"
-    if candidate.is_file():
-        return candidate
-    # Fall back to scanning — handles odd characters that may have been
-    # normalized in the identifier.
+    """Map a model identifier (GGUF stem) back to its on-disk .gguf path."""
     for p in discover_gguf_files(models_dir):
-        if _gguf_model_id(p, models_dir) == model_id:
+        if p.stem == model_id:
             return p
     return None
 
@@ -1016,6 +1007,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--clean-run",
         action="store_true",
         help="Delete existing results tables before generating new ones.",
+    )
+    parser.add_argument(
+        "--recreate-table",
+        "--recreate_table",
+        dest="recreate_table",
+        action="store_true",
+        help="Skip benchmarks and regenerate the results table from existing "
+        "JSON results in the results/ directory.",
     )
     parser.add_argument(
         "--save-table",
@@ -1635,6 +1634,15 @@ def _build_table_data(results: list[dict]) -> dict:
             runner = determine_runner_from_toml(config_path)
         if not runner:
             runner = "lmstudio"
+        # For llama.cpp, read the TOML's name field and take only its last
+        # path component so the table always shows a short model name
+        # regardless of whether the JSON was created before or after the
+        # short-name change (old names were full relative paths like
+        # "lmstudio-community/gemma-4-31B-it-GGUF/gemma-4-31B-it-Q4_K_M").
+        if runner == "llama.cpp" and isinstance(config_path, Path) and config_path.is_file():
+            toml_name = read_toml_field(config_path.read_text(), "name")
+            if toml_name:
+                model = toml_name.rsplit("/", 1)[-1]
         passed = r.get("passed", 0)
         hallucinated = r.get("hallucinated", 0)
         bonus = r.get("bonus", 0)
@@ -1793,11 +1801,14 @@ def _build_full_html(
     header: list[str],
     header_cells: list[str],
     html_rows: list[str],
-    col_widths_px: list[int],
     corpus: str,
 ) -> str:
     """Build a complete HTML file from scratch."""
     title = f"Results Table{f' — {corpus}' if corpus else ''}"
+    toggle_buttons = "".join(
+        f'<button class="col-toggle active" data-col="{i}">{h}</button>'
+        for i, h in enumerate(header)
+    )
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1809,16 +1820,16 @@ def _build_full_html(
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
             background: #f5f5f5;
             color: #333;
-            padding: 24px;
+            padding: 16px;
             margin: 0;
+            box-sizing: border-box;
         }}
         .table-container {{
-            max-width: 960px;
-            margin: 0 auto;
+            width: 100%;
             background: #fff;
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-            overflow: hidden;
+            overflow-x: auto;
         }}
         h2 {{
             margin: 0;
@@ -1827,41 +1838,57 @@ def _build_full_html(
             color: #fff;
             font-size: 18px;
             font-weight: 500;
+            border-radius: 8px 8px 0 0;
+        }}
+        .col-toggle-bar {{
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }}
+        .col-toggle-label {{
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+            margin-right: 2px;
+            white-space: nowrap;
+        }}
+        .col-toggle {{
+            padding: 3px 10px;
+            border: 1px solid #1a73e8;
+            border-radius: 12px;
+            background: #1a73e8;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            line-height: 1.4;
+        }}
+        .col-toggle:not(.active) {{
+            background: #fff;
+            color: #1a73e8;
         }}
         table {{
             width: 100%;
+            min-width: 600px;
             border-collapse: collapse;
+            table-layout: auto;
         }}
         thead th {{
             background: #f8f9fa;
-            padding: 10px 12px;
+            padding: 10px 24px 10px 12px;
             text-align: left;
             font-weight: 600;
             font-size: 14px;
             color: #555;
             border-bottom: 2px solid #e0e0e0;
-        }}
-        tbody td {{
-            padding: 10px 12px;
-            font-size: 14px;
-            border-bottom: 1px solid #eee;
-        }}
-        tbody tr:hover {{
-            background: #f8f9fa;
-        }}
-        tbody tr:last-child td {{
-            border-bottom: none;
-        }}
-        tfoot td {{
-            padding: 12px;
-            font-weight: 600;
-            background: #f8f9fa;
-            border-top: 2px solid #1a73e8;
-        }}
-        thead th {{
             cursor: pointer;
             user-select: none;
             position: relative;
+            white-space: nowrap;
         }}
         thead th:hover {{
             background: #e8f4fd;
@@ -1877,11 +1904,43 @@ def _build_full_html(
             opacity: 1;
             color: #1a73e8;
         }}
+        tbody td {{
+            padding: 10px 12px;
+            font-size: 14px;
+            border-bottom: 1px solid #eee;
+        }}
+        tbody tr:hover {{
+            background: #f8f9fa;
+        }}
+        tbody tr:last-child td {{
+            border-bottom: none;
+        }}
+        .resize-handle {{
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 6px;
+            height: 100%;
+            cursor: col-resize;
+            user-select: none;
+            background: transparent;
+        }}
+        .resize-handle:hover, .resize-handle.dragging {{
+            background: rgba(26, 115, 232, 0.4);
+        }}
+        body.col-resizing {{
+            cursor: col-resize !important;
+            user-select: none !important;
+        }}
     </style>
 </head>
 <body>
     <div class="table-container">
         <h2>{title}</h2>
+        <div class="col-toggle-bar">
+            <span class="col-toggle-label">Columns:</span>
+            {toggle_buttons}
+        </div>
         <table>
             <thead>
                 <tr>
@@ -1907,43 +1966,32 @@ def _build_full_html(
         function sortTable(colIndex) {{
             const tbody = document.getElementById("benchmark-rows");
             if (!tbody) return;
-
             const rows = Array.from(tbody.querySelectorAll("tr"));
-
             if (colIndex === sortCol) {{
                 sortAsc = !sortAsc;
             }} else {{
                 sortCol = colIndex;
                 sortAsc = true;
             }}
-
             rows.sort((a, b) => {{
                 const cellsA = a.querySelectorAll("td");
                 const cellsB = b.querySelectorAll("td");
                 if (colIndex >= cellsA.length || colIndex >= cellsB.length) return 0;
-
                 const valA = cellsA[colIndex].textContent.trim();
                 const valB = cellsB[colIndex].textContent.trim();
-
                 const numA = parseNumeric(valA);
                 const numB = parseNumeric(valB);
-
                 if (numA !== null && numB !== null) {{
                     return sortAsc ? numA - numB : numB - numA;
                 }}
-
-                const comparison = valA.localeCompare(valB);
-                return sortAsc ? comparison : -comparison;
+                return sortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
             }});
-
             tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
-
             document.querySelectorAll("thead th").forEach((th, i) => {{
                 th.classList.remove("active-sort");
                 const arrow = th.querySelector(".sort-arrow");
                 if (arrow) arrow.textContent = " \\u25B2\\u25BC";
             }});
-
             const activeTh = document.querySelectorAll("thead th")[colIndex];
             if (activeTh) {{
                 activeTh.classList.add("active-sort");
@@ -1952,12 +2000,68 @@ def _build_full_html(
             }}
         }}
 
+        function setColumnWidth(colIndex, width) {{
+            const px = Math.max(40, width) + "px";
+            const th = document.querySelectorAll("thead th")[colIndex];
+            if (th) th.style.minWidth = px;
+        }}
+
+        function attachResize(th, colIndex) {{
+            const handle = document.createElement("div");
+            handle.className = "resize-handle";
+            th.appendChild(handle);
+            let startX = 0, startWidth = 0, dragging = false;
+            handle.addEventListener("mousedown", (e) => {{
+                e.preventDefault();
+                e.stopPropagation();
+                dragging = true;
+                startX = e.pageX;
+                startWidth = th.offsetWidth;
+                handle.classList.add("dragging");
+                document.body.classList.add("col-resizing");
+                const onMove = (ev) => {{
+                    if (!dragging) return;
+                    setColumnWidth(colIndex, startWidth + (ev.pageX - startX));
+                }};
+                const onUp = () => {{
+                    dragging = false;
+                    handle.classList.remove("dragging");
+                    document.body.classList.remove("col-resizing");
+                    document.removeEventListener("mousemove", onMove);
+                    document.removeEventListener("mouseup", onUp);
+                }};
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+            }});
+            handle.addEventListener("click", (e) => e.stopPropagation());
+        }}
+
+        function toggleColumn(colIndex, visible) {{
+            const th = document.querySelectorAll("thead th")[colIndex];
+            if (th) th.style.display = visible ? "" : "none";
+            document.querySelectorAll(
+                `#benchmark-rows tr td:nth-child(${{colIndex + 1}})`
+            ).forEach(td => {{ td.style.display = visible ? "" : "none"; }});
+        }}
+
         document.querySelectorAll("thead th").forEach((th, i) => {{
-            th.addEventListener("click", () => sortTable(i));
+            th.addEventListener("click", (e) => {{
+                if (e.target.classList.contains("resize-handle")) return;
+                sortTable(i);
+            }});
             const arrow = document.createElement("span");
             arrow.className = "sort-arrow";
             arrow.textContent = " \\u25B2\\u25BC";
             th.appendChild(arrow);
+            attachResize(th, i);
+        }});
+
+        document.querySelectorAll(".col-toggle").forEach((btn) => {{
+            btn.addEventListener("click", () => {{
+                const col = parseInt(btn.dataset.col, 10);
+                const nowActive = btn.classList.toggle("active");
+                toggleColumn(col, nowActive);
+            }});
         }});
     }})();
     </script>
@@ -1981,142 +2085,23 @@ def generate_html_table(
     header = data["header"]
     rows = data["rows"]
 
-    # Compute column widths for consistent styling
-    col_widths = [len(h) for h in header]
-    for row in rows:
-        for i, cell in enumerate(row):
-            col_widths[i] = max(col_widths[i], len(cell))
-
-    # Compute column widths in pixels (rough estimate: 8px per char + padding)
-    col_widths_px = [max(w * 8 + 20, 80) for w in col_widths]
-
     html_rows = []
     for row in rows:
-        cells = []
-        for i, cell in enumerate(row):
-            width = col_widths_px[i]
-            cells.append(
-                f'<td style="width: {width}px; padding: 6px 12px; text-align: left; '
-                f'border-bottom: 1px solid #ddd; vertical-align: top;">{cell}</td>'
-            )
+        cells = [
+            f'<td style="padding: 6px 12px; text-align: left; '
+            f'border-bottom: 1px solid #ddd; vertical-align: top;">{cell}</td>'
+            for cell in row
+        ]
         html_rows.append("<tr>" + "".join(cells) + "</tr>")
 
-    header_cells = []
-    for i, h in enumerate(header):
-        width = col_widths_px[i]
-        header_cells.append(
-            f'<th data-column="{i}" style="width: {width}px;">{h}</th>'
-        )
-
-    new_tbody = "\n".join(html_rows)
+    header_cells = [
+        f'<th data-column="{i}">{h}</th>'
+        for i, h in enumerate(header)
+    ]
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    if save_path.exists():
-        existing = save_path.read_text()
-        marker_start = '<tbody id="benchmark-rows">'
-        marker_end = "</tbody><!-- BENCHMARK_ROWS_END -->"
-        start_idx = existing.find(marker_start)
-        end_idx = existing.find(marker_end)
-
-        if start_idx != -1 and end_idx != -1:
-            thead_start = existing.find("<thead>")
-            thead_end = existing.find("</thead>")
-            if thead_start != -1 and thead_end != -1:
-                old_thead = existing[thead_start : thead_end + len("</thead>")]
-                new_thead = "<thead>" + "".join(header_cells) + "</thead>"
-                existing = existing.replace(old_thead, new_thead)
-
-            # Remove any existing sorting script and body tag
-            existing = existing.replace("</script>", "", 1)
-            existing = existing.replace("</body>", "", 1)
-
-            before = existing[: start_idx + len(marker_start)]
-            after = existing[end_idx:]
-            html_content = before + new_tbody + after
-            # Append the sorting script at the end of the body
-            html_content = html_content.rstrip() + "\n    </body>\n</html>"
-            html_content = html_content.replace(
-                "</html>",
-                """    <script>
-    (function() {
-        let sortCol = -1;
-        let sortAsc = true;
-
-        function parseNumeric(val) {
-            const cleaned = val.replace(/,/g, '').replace(/\\(.*\\)/, '').trim();
-            const num = parseFloat(cleaned);
-            return isNaN(num) ? null : num;
-        }
-
-        function sortTable(colIndex) {
-            const tbody = document.getElementById("benchmark-rows");
-            if (!tbody) return;
-
-            const rows = Array.from(tbody.querySelectorAll("tr"));
-
-            if (colIndex === sortCol) {
-                sortAsc = !sortAsc;
-            } else {
-                sortCol = colIndex;
-                sortAsc = true;
-            }
-
-            rows.sort((a, b) => {
-                const cellsA = a.querySelectorAll("td");
-                const cellsB = b.querySelectorAll("td");
-                if (colIndex >= cellsA.length || colIndex >= cellsB.length) return 0;
-
-                const valA = cellsA[colIndex].textContent.trim();
-                const valB = cellsB[colIndex].textContent.trim();
-
-                const numA = parseNumeric(valA);
-                const numB = parseNumeric(valB);
-
-                if (numA !== null && numB !== null) {
-                    return sortAsc ? numA - numB : numB - numA;
-                }
-
-                const comparison = valA.localeCompare(valB);
-                return sortAsc ? comparison : -comparison;
-            });
-
-            tbody.innerHTML = rows.map(r => r.outerHTML).join("\\n");
-
-            document.querySelectorAll("thead th").forEach((th, i) => {
-                th.classList.remove("active-sort");
-                const arrow = th.querySelector(".sort-arrow");
-                if (arrow) arrow.textContent = " \\u25B2\\u25BC";
-            });
-
-            const activeTh = document.querySelectorAll("thead th")[colIndex];
-            if (activeTh) {
-                activeTh.classList.add("active-sort");
-                const arrow = activeTh.querySelector(".sort-arrow");
-                if (arrow) arrow.textContent = sortAsc ? "\\u25B2" : "\\u25BC";
-            }
-        }
-
-        document.querySelectorAll("thead th").forEach((th, i) => {
-            th.addEventListener("click", () => sortTable(i));
-            const arrow = document.createElement("span");
-            arrow.className = "sort-arrow";
-            arrow.textContent = " \\u25B2\\u25BC";
-            th.appendChild(arrow);
-        });
-    }})();
-</script>
-</html>""",
-                1,
-            )
-        else:
-            html_content = _build_full_html(
-                header, header_cells, html_rows, col_widths_px, corpus
-            )
-    else:
-        html_content = _build_full_html(
-            header, header_cells, html_rows, col_widths_px, corpus
-        )
+    html_content = _build_full_html(header, header_cells, html_rows, corpus)
 
     save_path.write_text(html_content)
     print(f"HTML results table written to: {save_path}")
@@ -2218,6 +2203,32 @@ def main() -> int:
             print(
                 f"  Removed {removed} result file(s) for corpus '{args.corpus}'."
             )
+
+    # --recreate-table: skip discovery/benchmarks, just rebuild the tables
+    # from existing JSON dumps in results/.
+    if args.recreate_table:
+        print("\n[Recreate] Rebuilding results tables from existing JSON dumps...")
+        parsed = parse_results_from_files(
+            args.corpus, args.user_models_dir, Path("results")
+        )
+        if not parsed:
+            print(
+                f"  No JSON results found for corpus '{args.corpus}' in results/. "
+                "Run a benchmark first.",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"  Found {len(parsed)} result file(s).")
+        generate_markdown_table(parsed, args.save_table, args.corpus)
+        html_table_path = args.save_table.with_suffix(".html")
+        generate_html_table(parsed, html_table_path, args.corpus)
+        if not args.dry_run:
+            print("\n[Recreate] Generating visual report...")
+            run_visualization()
+        print("\n" + "=" * 60)
+        print("  Done!")
+        print("=" * 60)
+        return 0
 
     all_results: list[dict] = []
 

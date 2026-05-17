@@ -15,4 +15,8 @@
 * Executing 'pixi run python benchmark_suite.py --corpus python --runner ollama --min-size 25' returns 'No models meet the --min-size 25 threshold; skipping Ollama.'
 Use 'ollama show <model name>, where <model name> is the name returned with 'ollama ls', then check the 'parameters' value to fiter based on --min-size provided by the user.
 * Add a calculation for the total tokens per second for each model and add it to the results table as a new column.
-* Let's add the runner 'llama.cpp' using the executable command llama.cpp as one of the runners available (--runners) in benchmark_suite.py. Llama.cpp only supports models that use the GGUF engine (.gguf), find available (.gguf) models to benchmark in ~/.lmstudio/models.
+* Let's add the runner 'llama.cpp' using the executable command llama.cpp as one of the runners available (--runners) in benchmark_suite.py. Llama.cpp only supports models that use the GGUF engine (.gguf), find available (.gguf) models to benchmark in ~/.lmstudio/models.
+* Add a CLI option --recreate_table that reads the results and creates the results table without re-running the models.
+* Allow resizing the results table columns by clicking and dragging on the column borders.
+* Allow hiding columns from the results table html and let the table width scale with browser window size.
+* Allow filtering the --include or --exclude patterns for the model name based on the path as well. For example, if the user requests (--include MTP), and the path is ~/.lmstudio/models/unsloth/Qwen3.6-27B-MTP-GGUF/Qwen3.6-27B-Q4_K_S.gguf) then it should run this model because MTP is in the path itself.
