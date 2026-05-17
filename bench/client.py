@@ -62,6 +62,6 @@ def chat_complete(
         data = r.json()
     content = data["choices"][0]["message"]["content"]
     usage = data.get("usage")
-    if usage is not None:
-        usage = {k: int(v) for k, v in usage.items()}
+    if isinstance(usage, dict):
+        usage = {k: int(v) for k, v in usage.items() if isinstance(v, (int, float))}
     return content, usage

@@ -1264,10 +1264,14 @@ def merge_results(
         cp = str(r.get("config_path", ""))
         new_map[cp] = r
 
-    # Overwrite with existing (parsed) data — existing takes priority
+    # Overwrite with existing (parsed) data — existing takes priority.
+    # Only update entries already in new_map so we don't absorb results
+    # from other runners (parse_results_from_files scans all corpus JSON
+    # files, not just the current runner's).
     for r in existing:
         cp = str(r.get("config_path", ""))
-        new_map[cp] = r
+        if cp in new_map:
+            new_map[cp] = r
 
     return list(new_map.values())
 
@@ -1287,6 +1291,7 @@ def _build_table_data(results: list[dict]) -> dict:
         "Bonus",
         "Primary",
         "Runtime (s)",
+        "Tokens",
         "Tokens/s",
     ]
     rows: list[list[str]] = []
@@ -1327,6 +1332,7 @@ def _build_table_data(results: list[dict]) -> dict:
                 str(bonus),
                 str(primary),
                 f"{runtime:.1f}",
+                f"{tokens:,}" if tokens else "-",
                 f"{tokens_per_sec:.1f}" if tokens_per_sec else "-",
             ]
         )

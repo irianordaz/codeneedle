@@ -82,6 +82,11 @@ def _build_prompt(target, text: str, multi_file: bool, suppress_thinking: bool) 
     )
 
 
+def _is_context_error(msg: str) -> bool:
+    m = msg.lower()
+    return any(s in m for s in ("context length", "n_ctx", "n_keep", "too long", "exceeds"))
+
+
 def _preflight_context_check(prompt: str, cfg: ClientConfig) -> str | None:
     """Send the actual prompt with max_tokens=1 to detect context-too-small.
 
