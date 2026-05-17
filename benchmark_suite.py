@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Benchmark suite orchestrator for LMStudio and Ollama models.
+"""Benchmark suite orchestrator for LMStudio, Ollama, and llama.cpp models.
 
-Discovers all models via `lms ls` or `ollama ls`, creates per-model config
+Discovers all models via `lms ls`, `ollama ls`, or a scan of
+`~/.lmstudio/models` for `.gguf` files (llama.cpp), creates per-model config
 TOMLs from templates in `configs/models/`, runs benchmarks sequentially with
 configurable pauses, produces a Markdown results table (with runtime and
 totals), and generates visual reports.
@@ -11,6 +12,7 @@ Usage:
     pixi run python benchmark_suite.py --corpus jquery --min-size 25B
     pixi run python benchmark_suite.py --corpus jquery --dry-run
     pixi run python benchmark_suite.py --corpus http_server --runner ollama
+    pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp
 """
 
 from __future__ import annotations
@@ -38,6 +40,9 @@ DEFAULT_SAVE_TABLE = Path("results_table.md")
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_SUBPROCESS_TIMEOUT = 10000  # ~2.8 hours per model
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_LLAMACPP_BASE_URL = "http://localhost:8080"
+DEFAULT_LLAMACPP_PORT = 8080
+DEFAULT_LLAMACPP_MODELS_DIR = Path.home() / ".lmstudio" / "models"
 DEFAULT_LOAD_VERIFY_TIMEOUT = 180.0
 LOAD_VERIFY_RETRY_INTERVAL = 3.0
 
@@ -253,16 +258,19 @@ def read_toml_field(content: str, field: str) -> str | None:
 
 
 def determine_runner_from_toml(toml_path: Path) -> str:
-    """Infer the runner (ollama or lmstudio) from a model TOML's base_url.
+    """Infer the runner (ollama, lmstudio, or llama.cpp) from a model TOML's base_url.
 
-    Ollama's default API port is 11434; LMStudio's is 1234. Falls back to
-    "lmstudio" when the file is missing or the base_url is unrecognised.
+    Ollama's default API port is 11434; LMStudio's is 1234; llama-server's
+    default is 8080. Falls back to "lmstudio" when the file is missing or
+    the base_url is unrecognised.
     """
     if not toml_path.is_file():
         return "lmstudio"
     base_url = read_toml_field(toml_path.read_text(), "base_url") or ""
     if "11434" in base_url:
         return "ollama"
+    if f":{DEFAULT_LLAMACPP_PORT}" in base_url:
+        return "llama.cpp"
     return "lmstudio"
 
 
@@ -691,6 +699,202 @@ def unload_all_loaded() -> list[str]:
     return unloaded
 
 
+# ---------------------------------------------------------------------------
+# llama.cpp runner (uses llama-server with .gguf files from ~/.lmstudio/models)
+# ---------------------------------------------------------------------------
+
+# Tracks the currently running llama-server subprocess so we can stop it on
+# unload. llama-server is a long-running OpenAI-compatible HTTP daemon; we
+# spawn one per model and tear it down before loading the next.
+_llamacpp_server_proc: subprocess.Popen | None = None
+
+
+def _parse_params_from_gguf_name(name: str) -> str | None:
+    """Extract a params token (e.g. "27B", "1.5B") from a GGUF filename.
+
+    Returns the first plausible match like "27B" or "1.5B", or None.
+    """
+    match = re.search(r"(\d+(?:\.\d+)?)\s*[bB]\b", name)
+    if match:
+        return f"{match.group(1)}B"
+    return None
+
+
+def _gguf_model_id(gguf_path: Path, models_dir: Path) -> str:
+    """Derive a model identifier from a GGUF file path.
+
+    Uses the path relative to the models dir (without extension) so the
+    identifier is stable, human-readable, and unique. E.g.
+    "lmstudio-community/Qwen3.6-27B-GGUF/Qwen3.6-27B-Q4_K_M".
+    """
+    try:
+        rel = gguf_path.relative_to(models_dir)
+    except ValueError:
+        rel = Path(gguf_path.name)
+    return str(rel.with_suffix(""))
+
+
+def discover_gguf_files(
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+) -> list[Path]:
+    """Find all *.gguf files under models_dir, skipping mmproj projector files.
+
+    mmproj-*.gguf files are multimodal projectors and are not standalone
+    LLMs — llama-server pairs them with their parent model via --mmproj.
+    """
+    if not models_dir.is_dir():
+        return []
+    out: list[Path] = []
+    for p in sorted(models_dir.rglob("*.gguf")):
+        if p.name.lower().startswith("mmproj"):
+            continue
+        out.append(p)
+    return out
+
+
+def discover_models_llamacpp(
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+) -> list[str]:
+    """Discover all GGUF models under models_dir as model identifiers."""
+    files = discover_gguf_files(models_dir)
+    if not files:
+        raise BenchmarkError(
+            f"No .gguf models found under {models_dir}. "
+            "Download a GGUF model in LM Studio first."
+        )
+    return [_gguf_model_id(p, models_dir) for p in files]
+
+
+def discover_models_with_params_llamacpp(
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+) -> list[tuple[str, str | None]]:
+    """Discover GGUF models with params parsed from their filenames."""
+    files = discover_gguf_files(models_dir)
+    if not files:
+        raise BenchmarkError(
+            f"No .gguf models found under {models_dir}. "
+            "Download a GGUF model in LM Studio first."
+        )
+    return [
+        (_gguf_model_id(p, models_dir), _parse_params_from_gguf_name(p.name))
+        for p in files
+    ]
+
+
+def _resolve_gguf_path(
+    model_id: str,
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+) -> Path | None:
+    """Map a model identifier back to its on-disk .gguf path."""
+    candidate = models_dir / f"{model_id}.gguf"
+    if candidate.is_file():
+        return candidate
+    # Fall back to scanning — handles odd characters that may have been
+    # normalized in the identifier.
+    for p in discover_gguf_files(models_dir):
+        if _gguf_model_id(p, models_dir) == model_id:
+            return p
+    return None
+
+
+def llamacpp_load_model(
+    model_id: str,
+    models_dir: Path = DEFAULT_LLAMACPP_MODELS_DIR,
+    port: int = DEFAULT_LLAMACPP_PORT,
+) -> bool:
+    """Start a llama-server process for the given GGUF model.
+
+    Stores the Popen handle in _llamacpp_server_proc so unload can stop it.
+    Returns True if the process started; readiness is checked separately by
+    verify_model_loaded.
+    """
+    global _llamacpp_server_proc
+
+    # Ensure any previous server is stopped before launching a new one.
+    llamacpp_unload_model(model_id)
+
+    gguf_path = _resolve_gguf_path(model_id, models_dir)
+    if gguf_path is None:
+        print(
+            f"  ERROR: could not resolve {model_id} to a .gguf file under "
+            f"{models_dir}",
+            file=sys.stderr,
+        )
+        return False
+
+    cmd = [
+        "llama-server",
+        "-m",
+        str(gguf_path),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(port),
+        "-ngl",
+        "999",
+        "-a",
+        model_id,
+    ]
+    print(f"  Launching: {' '.join(cmd)}")
+    try:
+        _llamacpp_server_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except FileNotFoundError:
+        print(
+            "  ERROR: 'llama-server' not found. Install llama.cpp "
+            "(e.g. `brew install llama.cpp`).",
+            file=sys.stderr,
+        )
+        return False
+    except Exception as e:
+        print(f"  ERROR launching llama-server for {model_id}: {e}", file=sys.stderr)
+        return False
+
+    print(f"  Loaded: {model_id} (pid {_llamacpp_server_proc.pid})")
+    return True
+
+
+def llamacpp_unload_model(model_id: str | None = None) -> bool:
+    """Stop the running llama-server process, if any."""
+    global _llamacpp_server_proc
+    proc = _llamacpp_server_proc
+    if proc is None:
+        return True
+    if proc.poll() is not None:
+        _llamacpp_server_proc = None
+        return True
+    try:
+        proc.terminate()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+        label = model_id or f"pid {proc.pid}"
+        print(f"  Unloaded: {label}")
+    except Exception as e:
+        print(
+            f"  WARNING unloading llama-server ({model_id}): {e}",
+            file=sys.stderr,
+        )
+        return False
+    finally:
+        _llamacpp_server_proc = None
+    return True
+
+
+def llamacpp_unload_all_loaded() -> list[str]:
+    """Stop the tracked llama-server (we only ever spawn one at a time)."""
+    if _llamacpp_server_proc is None or _llamacpp_server_proc.poll() is not None:
+        return []
+    if llamacpp_unload_model():
+        return ["llama-server"]
+    return []
+
+
 def verify_model_loaded(
     model_name: str,
     base_url: str,
@@ -764,10 +968,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--runner",
+        "--runners",
+        dest="runner",
         type=str,
-        default="ollama,lmstudio",
-        help="Model runner(s) to benchmark, comma-delimited (default: ollama,lmstudio). "
-        "Choices: lmstudio, ollama. Example: --runner lmstudio,ollama",
+        default="ollama,lmstudio,llama.cpp",
+        help="Model runner(s) to benchmark, comma-delimited "
+        "(default: ollama,lmstudio,llama.cpp). "
+        "Choices: lmstudio, ollama, llama.cpp. "
+        "Example: --runner lmstudio,ollama,llama.cpp",
     )
     parser.add_argument(
         "--corpus",
@@ -859,6 +1067,8 @@ def discover_models(runner: str = "lmstudio") -> list[str]:
     """Discover all installed models via `lms ls` or `ollama ls`."""
     if runner == "ollama":
         return discover_models_ollama()
+    if runner == "llama.cpp":
+        return discover_models_llamacpp()
     return discover_models_lmstudio()
 
 
@@ -914,6 +1124,8 @@ def discover_models_with_params(
     """Discover all installed models, returning (model_name, params) tuples."""
     if runner == "ollama":
         return discover_models_with_params_ollama()
+    if runner == "llama.cpp":
+        return discover_models_with_params_llamacpp()
     return discover_models_with_params_lmstudio()
 
 
@@ -984,11 +1196,12 @@ def generate_user_configs(
     """
     user_models_dir.mkdir(parents=True, exist_ok=True)
 
-    base_url = (
-        DEFAULT_OLLAMA_BASE_URL
-        if runner == "ollama"
-        else "http://localhost:1234"
-    )
+    if runner == "ollama":
+        base_url = DEFAULT_OLLAMA_BASE_URL
+    elif runner == "llama.cpp":
+        base_url = DEFAULT_LLAMACPP_BASE_URL
+    else:
+        base_url = "http://localhost:1234"
 
     created: list[Path] = []
     seen_filenames: dict[str, Path] = {}  # For collision detection
@@ -1071,10 +1284,15 @@ def run_benchmarks(
     """
     results: list[dict] = []
 
-    load_model_fn = ollama_load_model if runner == "ollama" else load_model
-    unload_model_fn = (
-        ollama_unload_model if runner == "ollama" else unload_model
-    )
+    if runner == "ollama":
+        load_model_fn = ollama_load_model
+        unload_model_fn = ollama_unload_model
+    elif runner == "llama.cpp":
+        load_model_fn = llamacpp_load_model
+        unload_model_fn = llamacpp_unload_model
+    else:
+        load_model_fn = load_model
+        unload_model_fn = unload_model
 
     # Determine if corpus is a file path or corpus config name
     corpus_path = Path(corpus)
@@ -2004,8 +2222,15 @@ def main() -> int:
     all_results: list[dict] = []
 
     for runner in runners:
-        runner_label = "Ollama" if runner == "ollama" else "LMStudio"
-        discover_cmd = "ollama ls" if runner == "ollama" else "lms ls"
+        if runner == "ollama":
+            runner_label = "Ollama"
+            discover_cmd = "ollama ls"
+        elif runner == "llama.cpp":
+            runner_label = "llama.cpp"
+            discover_cmd = f"scan {DEFAULT_LLAMACPP_MODELS_DIR}"
+        else:
+            runner_label = "LMStudio"
+            discover_cmd = "lms ls"
 
         print("\n" + "=" * 60)
         print(f"  Runner: {runner_label}")
@@ -2109,6 +2334,8 @@ def main() -> int:
             print("\n[3.5/7] Unloading all loaded models...")
             if runner == "ollama":
                 unloaded = ollama_unload_all_loaded()
+            elif runner == "llama.cpp":
+                unloaded = llamacpp_unload_all_loaded()
             else:
                 unloaded = unload_all_loaded()
             if unloaded:
