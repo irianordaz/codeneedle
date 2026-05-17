@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+import httpx
+
 from bench.tokens import count_tokens
 
 # ---------------------------------------------------------------------------
@@ -36,6 +38,8 @@ DEFAULT_SAVE_TABLE = Path("results_table.md")
 DEFAULT_COOLDOWN_SECONDS = 30
 DEFAULT_SUBPROCESS_TIMEOUT = 10000  # ~2.8 hours per model
 DEFAULT_OLLAMA_BASE_URL = "http://localhost:11434"
+DEFAULT_LOAD_VERIFY_TIMEOUT = 180.0
+LOAD_VERIFY_RETRY_INTERVAL = 3.0
 
 
 class BenchmarkError(Exception):
@@ -687,6 +691,68 @@ def unload_all_loaded() -> list[str]:
     return unloaded
 
 
+def verify_model_loaded(
+    model_name: str,
+    base_url: str,
+    timeout: float = DEFAULT_LOAD_VERIFY_TIMEOUT,
+    retry_interval: float = LOAD_VERIFY_RETRY_INTERVAL,
+) -> bool:
+    """Probe the model with a tiny chat-completions request until it responds.
+
+    `lms load` sometimes returns success before the model is queryable, and
+    `ollama pull` only downloads weights without loading them into VRAM —
+    the first benchmark request then times out or errors. Polling the
+    OpenAI-compatible endpoint until a 200 comes back catches both cases
+    and lets us skip the model cleanly instead of poisoning the run.
+    """
+    if not base_url:
+        print(
+            f"  WARNING: no base_url available for {model_name}; "
+            "skipping load verification.",
+            file=sys.stderr,
+        )
+        return True
+
+    url = f"{base_url.rstrip('/')}/v1/chat/completions"
+    payload = {
+        "model": model_name,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+        "temperature": 0.0,
+        "stream": False,
+    }
+    headers = {"Content-Type": "application/json"}
+
+    deadline = time.monotonic() + timeout
+    last_error: str | None = None
+    attempt = 0
+    while time.monotonic() < deadline:
+        attempt += 1
+        remaining = max(1.0, deadline - time.monotonic())
+        try:
+            with httpx.Client(timeout=remaining) as client:
+                r = client.post(url, json=payload, headers=headers)
+                if r.status_code == 200:
+                    print(
+                        f"  Verified loaded: {model_name} "
+                        f"(attempt {attempt})"
+                    )
+                    return True
+                last_error = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            last_error = f"{type(e).__name__}: {e}"
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(retry_interval)
+
+    print(
+        f"  ERROR: {model_name} not responding after {timeout:.0f}s "
+        f"({attempt} attempt(s)). Last error: {last_error}",
+        file=sys.stderr,
+    )
+    return False
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -760,6 +826,14 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_SUBPROCESS_TIMEOUT,
         help=f"Per-model subprocess timeout in seconds (default: {DEFAULT_SUBPROCESS_TIMEOUT}).",
+    )
+    parser.add_argument(
+        "--load-verify-timeout",
+        type=float,
+        default=DEFAULT_LOAD_VERIFY_TIMEOUT,
+        help="Seconds to wait after loading a model for it to respond to a "
+        f"probe request (default: {DEFAULT_LOAD_VERIFY_TIMEOUT}). "
+        "Set to 0 to skip verification.",
     )
     parser.add_argument(
         "--includes",
@@ -981,6 +1055,7 @@ def run_benchmarks(
     dry_run: bool = False,
     subprocess_timeout: int = DEFAULT_SUBPROCESS_TIMEOUT,
     runner: str = "lmstudio",
+    load_verify_timeout: float = DEFAULT_LOAD_VERIFY_TIMEOUT,
 ) -> list[dict]:
     """Run benchmarks for each config, sleeping between runs.
 
@@ -1062,6 +1137,37 @@ def run_benchmarks(
                 print(f"  Sleeping {cooldown_seconds} seconds...")
                 time.sleep(cooldown_seconds)
             continue
+
+        # Verify the model is actually serving requests before launching the
+        # benchmark subprocess. `lms load` / `ollama pull` can succeed before
+        # the model is queryable, which causes bench.py to fail mid-corpus.
+        if load_verify_timeout > 0:
+            base_url = (
+                read_toml_field(config_path.read_text(), "base_url") or ""
+            )
+            if not verify_model_loaded(
+                model_name, base_url, timeout=load_verify_timeout
+            ):
+                print(
+                    f"  SKIPPED: {model_name} loaded but did not become ready.",
+                    file=sys.stderr,
+                )
+                unload_model_fn(model_name)
+                results.append(
+                    {
+                        "config_path": config_path,
+                        "passed": 0,
+                        "hallucinated": 0,
+                        "bonus": 0,
+                        "runtime": 0.0,
+                        "error": "model not ready after load",
+                        "runner": runner,
+                    }
+                )
+                if i < len(config_paths) - 1:
+                    print(f"  Sleeping {cooldown_seconds} seconds...")
+                    time.sleep(cooldown_seconds)
+                continue
 
         start_time = time.monotonic()
         benchmark_ok = False
@@ -1846,6 +1952,7 @@ def main() -> int:
     print(f"  Save table:      {args.save_table}")
     print(f"  Cooldown (s):    {args.cooldown_seconds}")
     print(f"  Timeout (s):     {args.timeout}")
+    print(f"  Load verify (s): {args.load_verify_timeout}")
     includes_list = (
         [k.strip() for k in args.includes.split(",") if k.strip()]
         if args.includes
@@ -2020,6 +2127,7 @@ def main() -> int:
                 dry_run=args.dry_run,
                 subprocess_timeout=args.timeout,
                 runner=runner,
+                load_verify_timeout=args.load_verify_timeout,
             )
 
             # Step 5: Parse results from JSON dump files (if any were generated)
@@ -2054,17 +2162,35 @@ def main() -> int:
             print(f"\nERROR: {e}", file=sys.stderr)
             return 1
 
-    # Generate consolidated results table across all runners
-    if all_results:
+    # Generate consolidated results table across all runners. Re-parse every
+    # JSON dump for this corpus so previous runs are preserved when the user
+    # did not pass --clean-run (which would have wiped the JSON files at
+    # startup). Current-run entries without a JSON file (load failures,
+    # timeouts) are merged in so errors stay visible.
+    all_parsed = parse_results_from_files(
+        args.corpus, args.user_models_dir, Path("results")
+    )
+    by_cp: dict[str, dict] = {}
+    for r in all_results:
+        cp = str(r.get("config_path", ""))
+        if cp:
+            by_cp[cp] = r
+    for r in all_parsed:
+        cp = str(r.get("config_path", ""))
+        if cp:
+            by_cp[cp] = r
+    final_results = list(by_cp.values())
+
+    if final_results:
         print("\n" + "=" * 60)
         print("  Consolidated Results (All Runners)")
         print("=" * 60)
         print("\n[Final] Generating consolidated Markdown results table...")
-        generate_markdown_table(all_results, args.save_table, args.corpus)
+        generate_markdown_table(final_results, args.save_table, args.corpus)
 
         html_table_path = args.save_table.with_suffix(".html")
         print("\n[Final] Generating consolidated HTML results table...")
-        generate_html_table(all_results, html_table_path, args.corpus)
+        generate_html_table(final_results, html_table_path, args.corpus)
 
     print("\n" + "=" * 60)
     print("  Done!")

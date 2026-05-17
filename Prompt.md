@@ -15,3 +15,4 @@
 * Executing 'pixi run python benchmark_suite.py --corpus python --runner ollama --min-size 25' returns 'No models meet the --min-size 25 threshold; skipping Ollama.'
 Use 'ollama show <model name>, where <model name> is the name returned with 'ollama ls', then check the 'parameters' value to fiter based on --min-size provided by the user.
 * Add a calculation for the total tokens per second for each model and add it to the results table as a new column.
+* Let's add the runner 'llama.cpp' using the executable command llama.cpp as one of the runners available (--runners) in benchmark_suite.py. Llama.cpp only supports models that use the GGUF engine (.gguf), find available (.gguf) models to benchmark in ~/.lmstudio/models.
