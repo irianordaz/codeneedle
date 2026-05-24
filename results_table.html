@@ -1,0 +1,285 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Results Table</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            background: #f5f5f5;
+            color: #333;
+            padding: 16px;
+            margin: 0;
+            box-sizing: border-box;
+        }
+        .table-container {
+            width: 100%;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            overflow-x: auto;
+        }
+        h2 {
+            margin: 0;
+            padding: 16px 24px;
+            background: #1a73e8;
+            color: #fff;
+            font-size: 18px;
+            font-weight: 500;
+            border-radius: 8px 8px 0 0;
+        }
+        .col-toggle-bar {
+            padding: 8px 16px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #e0e0e0;
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            align-items: center;
+        }
+        .col-toggle-label {
+            font-size: 12px;
+            color: #666;
+            font-weight: 500;
+            margin-right: 2px;
+            white-space: nowrap;
+        }
+        .col-toggle {
+            padding: 3px 10px;
+            border: 1px solid #1a73e8;
+            border-radius: 12px;
+            background: #1a73e8;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+            transition: background 0.15s, color 0.15s;
+            line-height: 1.4;
+        }
+        .col-toggle:not(.active) {
+            background: #fff;
+            color: #1a73e8;
+        }
+        table {
+            width: 100%;
+            min-width: 600px;
+            border-collapse: collapse;
+            table-layout: auto;
+        }
+        thead th {
+            background: #f8f9fa;
+            padding: 10px 24px 10px 12px;
+            text-align: left;
+            font-weight: 600;
+            font-size: 14px;
+            color: #555;
+            border-bottom: 2px solid #e0e0e0;
+            cursor: pointer;
+            user-select: none;
+            position: relative;
+            white-space: nowrap;
+        }
+        thead th:hover {
+            background: #e8f4fd;
+        }
+        thead th .sort-arrow {
+            display: inline-block;
+            margin-left: 6px;
+            font-size: 10px;
+            opacity: 0.4;
+            transition: opacity 0.2s;
+        }
+        thead th.active-sort .sort-arrow {
+            opacity: 1;
+            color: #1a73e8;
+        }
+        tbody td {
+            padding: 10px 12px;
+            font-size: 14px;
+            border-bottom: 1px solid #eee;
+        }
+        tbody tr:hover {
+            background: #f8f9fa;
+        }
+        tbody tr:last-child td {
+            border-bottom: none;
+        }
+        .resize-handle {
+            position: absolute;
+            top: 0;
+            right: 0;
+            width: 6px;
+            height: 100%;
+            cursor: col-resize;
+            user-select: none;
+            background: transparent;
+        }
+        .resize-handle:hover, .resize-handle.dragging {
+            background: rgba(26, 115, 232, 0.4);
+        }
+        body.col-resizing {
+            cursor: col-resize !important;
+            user-select: none !important;
+        }
+    </style>
+</head>
+<body>
+    <div class="table-container">
+        <h2>Results Table — python</h2>
+        <div class="col-toggle-bar">
+            <span class="col-toggle-label">Columns:</span>
+            <button class="col-toggle active" data-col="0">Model</button><button class="col-toggle active" data-col="1">Runner</button><button class="col-toggle active" data-col="2">Pass</button><button class="col-toggle active" data-col="3">Hallucinations</button><button class="col-toggle active" data-col="4">Bonus</button><button class="col-toggle active" data-col="5">Primary</button><button class="col-toggle active" data-col="6">Runtime (s)</button><button class="col-toggle active" data-col="7">Tokens</button><button class="col-toggle active" data-col="8">Tokens/s</button>
+        </div>
+        <div class="col-toggle-bar" id="model-filter-bar">
+            <span class="col-toggle-label">Models:</span>
+            <input type="text" id="model-filter-input" placeholder="Filter models..." style="padding:3px 8px;border:1px solid #ccc;border-radius:4px;font-size:12px;width:200px;" />
+        </div>
+        <table>
+            <thead>
+                <tr>
+<th data-column="0">Model</th><th data-column="1">Runner</th><th data-column="2">Pass</th><th data-column="3">Hallucinations</th><th data-column="4">Bonus</th><th data-column="5">Primary</th><th data-column="6">Runtime (s)</th><th data-column="7">Tokens</th><th data-column="8">Tokens/s</th>
+                </tr>
+            </thead>
+            <tbody id="benchmark-rows">
+<tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen3_6_27b_mtp-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">148</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">110.9</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,589</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">14.3</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen_qwen3_6_27b-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">150</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">142.4</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,600</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">11.2</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio_community_gemma_4_31B_it_GGUF_gemma_4_31B_it_Q4_K_M-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">154</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1185.8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">13,410</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">11.3</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen_qwen3_6_35b_a3b-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">4</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">43</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">155</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">39.3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">2,107</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">53.7</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">Qwen3_6_27B_Q4_K_S-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">143</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">125.1</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,625</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">13.0</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">Qwen3_6_35B_A3B_UD_Q4_K_S-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">30</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">152</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">38.2</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,919</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">50.3</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio_community_Qwen3_6_27B_GGUF_Qwen3_6_27B_Q4_K_M-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">17</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">146</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">136.9</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,743</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">12.7</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio_community_Qwen3_6_35B_A3B_GGUF_Qwen3_6_35B_A3B_Q4_K_M-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">26</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">141</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">31.8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,797</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">56.5</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">mlx_community_qwen3_6_27b-mlx</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">140</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">291.0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,586</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">5.4</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen3_6_35b_a3b_mtp-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">20</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">105</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">148</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">39.6</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">2,797</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">70.7</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">mlx_community_qwen3_6_35b_a3b-mlx</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">25</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">104</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">142</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">75.6</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">2,788</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">36.9</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen3_6_27b_coding_nvfp4-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">26</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">3</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">120</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">133.0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,567</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">11.8</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">google_gemma_4_31b-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">8</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">105</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">133</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">158</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1180.1</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">13,434</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">11.4</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">qwen3_6_35b_a3b_coding_nvfp4-gguf</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">lmstudio</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">7</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">32</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">23</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">110</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">31.0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1,747</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">56.4</td></tr><tr><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">gemma4_31b_mlx-mlx</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">ollama</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">4</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">0</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">81</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">1071.6</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">11,112</td><td style="padding: 6px 12px; text-align: left; border-bottom: 1px solid #ddd; vertical-align: top;">10.4</td></tr>
+            </tbody><!-- BENCHMARK_ROWS_END -->
+        </table>
+    </div>
+    <script>
+    (function() {
+        const SHOW_KEYWORDS = [];
+        let sortCol = -1;
+        let sortAsc = true;
+
+        function parseNumeric(val) {
+            const cleaned = val.replace(/,/g, '').replace(/\(.*\)/, '').trim();
+            const num = parseFloat(cleaned);
+            return isNaN(num) ? null : num;
+        }
+
+        function sortTable(colIndex) {
+            const tbody = document.getElementById("benchmark-rows");
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll("tr"));
+            if (colIndex === sortCol) {
+                sortAsc = !sortAsc;
+            } else {
+                sortCol = colIndex;
+                sortAsc = true;
+            }
+            rows.sort((a, b) => {
+                const cellsA = a.querySelectorAll("td");
+                const cellsB = b.querySelectorAll("td");
+                if (colIndex >= cellsA.length || colIndex >= cellsB.length) return 0;
+                const valA = cellsA[colIndex].textContent.trim();
+                const valB = cellsB[colIndex].textContent.trim();
+                const numA = parseNumeric(valA);
+                const numB = parseNumeric(valB);
+                if (numA !== null && numB !== null) {
+                    return sortAsc ? numA - numB : numB - numA;
+                }
+                return sortAsc ? valA.localeCompare(valB) : valB.localeCompare(valA);
+            });
+            tbody.innerHTML = rows.map(r => r.outerHTML).join("\n");
+            document.querySelectorAll("thead th").forEach((th, i) => {
+                th.classList.remove("active-sort");
+                const arrow = th.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = " \u25B2\u25BC";
+            });
+            const activeTh = document.querySelectorAll("thead th")[colIndex];
+            if (activeTh) {
+                activeTh.classList.add("active-sort");
+                const arrow = activeTh.querySelector(".sort-arrow");
+                if (arrow) arrow.textContent = sortAsc ? "\u25B2" : "\u25BC";
+            }
+        }
+
+        function setColumnWidth(colIndex, width) {
+            const px = Math.max(40, width) + "px";
+            const th = document.querySelectorAll("thead th")[colIndex];
+            if (th) th.style.minWidth = px;
+        }
+
+        function attachResize(th, colIndex) {
+            const handle = document.createElement("div");
+            handle.className = "resize-handle";
+            th.appendChild(handle);
+            let startX = 0, startWidth = 0, dragging = false;
+            handle.addEventListener("mousedown", (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                dragging = true;
+                startX = e.pageX;
+                startWidth = th.offsetWidth;
+                handle.classList.add("dragging");
+                document.body.classList.add("col-resizing");
+                const onMove = (ev) => {
+                    if (!dragging) return;
+                    setColumnWidth(colIndex, startWidth + (ev.pageX - startX));
+                };
+                const onUp = () => {
+                    dragging = false;
+                    handle.classList.remove("dragging");
+                    document.body.classList.remove("col-resizing");
+                    document.removeEventListener("mousemove", onMove);
+                    document.removeEventListener("mouseup", onUp);
+                };
+                document.addEventListener("mousemove", onMove);
+                document.addEventListener("mouseup", onUp);
+            });
+            handle.addEventListener("click", (e) => e.stopPropagation());
+        }
+
+        function toggleColumn(colIndex, visible) {
+            const th = document.querySelectorAll("thead th")[colIndex];
+            if (th) th.style.display = visible ? "" : "none";
+            document.querySelectorAll(
+                `#benchmark-rows tr td:nth-child(${colIndex + 1})`
+            ).forEach(td => { td.style.display = visible ? "" : "none"; });
+        }
+
+        function applyModelFilter() {
+            const input = document.getElementById("model-filter-input");
+            if (!input) return;
+            const kw = input.value.trim().toLowerCase();
+            const rows = document.querySelectorAll("#benchmark-rows tr");
+            rows.forEach(row => {
+                const modelCell = row.querySelector("td:first-child");
+                if (!modelCell) return;
+                const modelName = modelCell.textContent.toLowerCase();
+                if (!kw) {
+                    row.style.display = "";
+                    return;
+                }
+                const match = SHOW_KEYWORDS.length > 0
+                    ? SHOW_KEYWORDS.some(k => modelName.includes(k))
+                    : modelName.includes(kw);
+                row.style.display = match ? "" : "none";
+            });
+        }
+
+        document.getElementById("model-filter-input")?.addEventListener("input", applyModelFilter);
+
+        document.querySelectorAll("thead th").forEach((th, i) => {
+            th.addEventListener("click", (e) => {
+                if (e.target.classList.contains("resize-handle")) return;
+                sortTable(i);
+            });
+            const arrow = document.createElement("span");
+            arrow.className = "sort-arrow";
+            arrow.textContent = " \u25B2\u25BC";
+            th.appendChild(arrow);
+            attachResize(th, i);
+        });
+
+        document.querySelectorAll(".col-toggle").forEach((btn) => {
+            btn.addEventListener("click", () => {
+                const col = parseInt(btn.dataset.col, 10);
+                const nowActive = btn.classList.toggle("active");
+                toggleColumn(col, nowActive);
+            });
+        });
+    })();
+    </script>
+</body>
+</html>

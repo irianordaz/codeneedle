@@ -1073,6 +1073,18 @@ def build_parser() -> argparse.ArgumentParser:
             "--includes for llama.cpp models."
         ),
     )
+    parser.add_argument(
+        "--show",
+        type=str,
+        default=None,
+        metavar="KW[,KW...]",
+        help=(
+            "Comma-delimited keywords (case-insensitive). Only models whose "
+            "name contains ANY keyword are shown in the results table; all "
+            "others are hidden. Same path-aware matching as --includes for "
+            "llama.cpp models."
+        ),
+    )
 
     # ---- Run behaviour -------------------------------------------------------
     parser.add_argument(
@@ -1703,12 +1715,33 @@ def merge_results(
     return list(new_map.values())
 
 
-def _build_table_data(results: list[dict]) -> dict:
+def _build_table_data(
+    results: list[dict],
+    show_keywords: list[str] | None = None,
+) -> dict:
     """Build shared table data from benchmark results."""
-    sorted_results = sorted(
-        results,
-        key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
-    )
+    # Filter results by show keywords if provided
+    if show_keywords:
+        filtered = []
+        for r in results:
+            config_path = r.get("config_path", Path("unknown"))
+            model = config_path.stem
+            if isinstance(config_path, Path) and config_path.is_file():
+                toml_name = read_toml_field(config_path.read_text(), "name")
+                if toml_name:
+                    model = toml_name.rsplit("/", 1)[-1]
+            model_lower = model.lower()
+            if any(kw in model_lower for kw in show_keywords):
+                filtered.append(r)
+        sorted_results = sorted(
+            filtered,
+            key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
+        )
+    else:
+        sorted_results = sorted(
+            results,
+            key=lambda r: (-r.get("passed", 0), r.get("hallucinated", 0)),
+        )
 
     header = [
         "Model",
@@ -1791,13 +1824,14 @@ def generate_markdown_table(
     results: list[dict],
     save_path: Path,
     corpus: str = "",
+    show_keywords: list[str] | None = None,
 ) -> None:
     """Generate a Markdown table with improved formatting.
 
     Appends new rows between markers so previous runs are preserved.
     Uses equal-width columns and one row per model for readability.
     """
-    data = _build_table_data(results)
+    data = _build_table_data(results, show_keywords=show_keywords)
     data["corpus"] = corpus
 
     header = data["header"]
@@ -1906,6 +1940,7 @@ def _build_full_html(
     header_cells: list[str],
     html_rows: list[str],
     corpus: str,
+    show_keywords: list[str] | None = None,
 ) -> str:
     """Build a complete HTML file from scratch."""
     title = f"Results Table{f' — {corpus}' if corpus else ''}"
@@ -1913,6 +1948,7 @@ def _build_full_html(
         f'<button class="col-toggle active" data-col="{i}">{h}</button>'
         for i, h in enumerate(header)
     )
+    show_kw_json = json.dumps(show_keywords or [])
     html_content = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -2045,6 +2081,10 @@ def _build_full_html(
             <span class="col-toggle-label">Columns:</span>
             {toggle_buttons}
         </div>
+        <div class="col-toggle-bar" id="model-filter-bar">
+            <span class="col-toggle-label">Models:</span>
+            <input type="text" id="model-filter-input" placeholder="Filter models..." style="padding:3px 8px;border:1px solid #ccc;border-radius:4px;font-size:12px;width:200px;" />
+        </div>
         <table>
             <thead>
                 <tr>
@@ -2058,6 +2098,7 @@ def _build_full_html(
     </div>
     <script>
     (function() {{
+        const SHOW_KEYWORDS = {show_kw_json};
         let sortCol = -1;
         let sortAsc = true;
 
@@ -2148,6 +2189,28 @@ def _build_full_html(
             ).forEach(td => {{ td.style.display = visible ? "" : "none"; }});
         }}
 
+        function applyModelFilter() {{
+            const input = document.getElementById("model-filter-input");
+            if (!input) return;
+            const kw = input.value.trim().toLowerCase();
+            const rows = document.querySelectorAll("#benchmark-rows tr");
+            rows.forEach(row => {{
+                const modelCell = row.querySelector("td:first-child");
+                if (!modelCell) return;
+                const modelName = modelCell.textContent.toLowerCase();
+                if (!kw) {{
+                    row.style.display = "";
+                    return;
+                }}
+                const match = SHOW_KEYWORDS.length > 0
+                    ? SHOW_KEYWORDS.some(k => modelName.includes(k))
+                    : modelName.includes(kw);
+                row.style.display = match ? "" : "none";
+            }});
+        }}
+
+        document.getElementById("model-filter-input")?.addEventListener("input", applyModelFilter);
+
         document.querySelectorAll("thead th").forEach((th, i) => {{
             th.addEventListener("click", (e) => {{
                 if (e.target.classList.contains("resize-handle")) return;
@@ -2178,12 +2241,13 @@ def generate_html_table(
     results: list[dict],
     save_path: Path,
     corpus: str = "",
+    show_keywords: list[str] | None = None,
 ) -> None:
     """Generate an HTML table with the same data as the Markdown table.
 
     Appends new rows between markers so previous runs are preserved.
     """
-    data = _build_table_data(results)
+    data = _build_table_data(results, show_keywords=show_keywords)
     data["corpus"] = corpus
 
     header = data["header"]
@@ -2205,7 +2269,9 @@ def generate_html_table(
 
     save_path.parent.mkdir(parents=True, exist_ok=True)
 
-    html_content = _build_full_html(header, header_cells, html_rows, corpus)
+    html_content = _build_full_html(
+        header, header_cells, html_rows, corpus, show_keywords
+    )
 
     save_path.write_text(html_content)
     print(f"HTML results table written to: {save_path}")
@@ -2270,13 +2336,28 @@ def main() -> int:
         if args.excludes
         else []
     )
+    show_list = (
+        [k.strip().lower() for k in args.show.split(",") if k.strip()]
+        if args.show
+        else []
+    )
     print(
         f"  Includes:        {', '.join(includes_list) if includes_list else '(all)'}"
     )
     print(
         f"  Excludes:        {', '.join(excludes_list) if excludes_list else '(none)'}"
     )
+    print(
+        f"  Show (table):    {', '.join(show_list) if show_list else '(all)'}"
+    )
     print("=" * 60)
+
+    # Parse --show keywords for table filtering
+    show_keywords = (
+        [k.strip().lower() for k in args.show.split(",") if k.strip()]
+        if args.show
+        else []
+    )
 
     # Ensure all relevant directories exist
     args.corpora_dir.mkdir(parents=True, exist_ok=True)
@@ -2487,13 +2568,17 @@ def main() -> int:
             # Step 6: Generate Markdown table
             print("\n[6/7] Generating Markdown results table...")
             generate_markdown_table(
-                benchmark_results, args.save_table, args.corpus
+                benchmark_results, args.save_table, args.corpus,
+                show_keywords=show_keywords or None,
             )
 
             # Step 6b: Generate HTML table
             html_table_path = args.save_table.with_suffix(".html")
             print("\n[6b/7] Generating HTML results table...")
-            generate_html_table(benchmark_results, html_table_path, args.corpus)
+            generate_html_table(
+                benchmark_results, html_table_path, args.corpus,
+                show_keywords=show_keywords or None,
+            )
 
             # Step 7: Run visualization (if not dry-run)
             if not args.dry_run:
@@ -2528,11 +2613,17 @@ def main() -> int:
         print("  Consolidated Results (All Runners)")
         print("=" * 60)
         print("\n[Final] Generating consolidated Markdown results table...")
-        generate_markdown_table(final_results, args.save_table, args.corpus)
+        generate_markdown_table(
+            final_results, args.save_table, args.corpus,
+            show_keywords=show_keywords or None,
+        )
 
         html_table_path = args.save_table.with_suffix(".html")
         print("\n[Final] Generating consolidated HTML results table...")
-        generate_html_table(final_results, html_table_path, args.corpus)
+        generate_html_table(
+            final_results, html_table_path, args.corpus,
+            show_keywords=show_keywords or None,
+        )
 
     print("\n" + "=" * 60)
     print("  Done!")

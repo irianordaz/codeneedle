@@ -1,0 +1,11 @@
+# Small fixture for fast iteration. ~50KB / ~14K tokens — fits in any context.
+# 11 named functions with ≥20 body lines.
+
+[files]
+directory = "/Users/iordaz/Development/vspaero_adjoint/src"
+glob = "vspaero_openmdao.py"
+limit = 1
+
+[sample]
+k = 16    # falls back to all 11 since the file has fewer
+seed = 42
