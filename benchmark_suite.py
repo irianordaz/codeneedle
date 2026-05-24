@@ -33,6 +33,9 @@ Usage
 # ~/.lmstudio/models, so directory names are searchable too:
     pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp --includes MTP
 
+# Filter the results table to show only models matching "qwen" or "gemma":
+    pixi run python benchmark_suite.py --corpus http_server --show qwen,gemma
+
 # Preview what would run without executing anything:
     pixi run python benchmark_suite.py --corpus http_server --dry-run
 

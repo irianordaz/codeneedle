@@ -82,6 +82,17 @@ For llama.cpp, `--includes` and `--excludes` match against the **full path** und
 pixi run python benchmark_suite.py --corpus http_server --runner llama.cpp --includes MTP
 ```
 
+### Filter the results table by keyword
+
+Show only models matching certain keywords in the results table (Markdown + HTML). All other models are hidden. This is useful when you benchmark many models but only want to compare a subset:
+
+```bash
+# Only show models matching "qwen" or "gemma" in the results table
+pixi run python benchmark_suite.py --corpus http_server --show qwen,gemma
+```
+
+The Markdown table excludes non-matching rows entirely. The HTML table hides them via a client-side filter box — you can type to filter further or clear the box to see everything again.
+
 ### Dry run
 
 Preview what would run without loading models or executing benchmarks:
@@ -115,6 +126,7 @@ pixi run python benchmark_suite.py --corpus http_server --recreate-table
 | `--min-size`            | No       | —                             | Skip models smaller than N billion parameters. Accepts `25B` or `25`. |
 | `--includes`            | No       | —                             | Comma-delimited keywords (case-insensitive). Only models whose name contains ANY keyword are benchmarked. For llama.cpp, the full path is searched. |
 | `--excludes`            | No       | —                             | Comma-delimited keywords (case-insensitive). Models whose name contains ANY keyword are skipped. For llama.cpp, the full path is searched. |
+| `--show`                | No       | —                             | Comma-delimited keywords (case-insensitive). Only models whose name contains ANY keyword are shown in the results table; all others are hidden. For llama.cpp, the full path is searched. |
 | `--dry-run`             | No       | `False`                       | Print planned actions without loading models or running benchmarks. |
 | `--clean-run`           | No       | `False`                       | Delete the existing results table and corpus JSON dumps before starting. |
 | `--recreate-table`      | No       | `False`                       | Skip benchmarks; rebuild tables from existing JSON dumps in `results/`. |
@@ -151,7 +163,7 @@ After a run completes:
 | Path | Description |
 |------|-------------|
 | `results_table.md` | Markdown table with per-model results |
-| `results_table.html` | Interactive HTML table — sortable columns (click header), resizable columns (drag border), per-column visibility toggles |
+| `results_table.html` | Interactive HTML table — sortable columns (click header), resizable columns (drag border), per-column visibility toggles, and a model filter box to show/hide rows by keyword |
 | `results/` | Per-model JSON dumps named `{corpus}__{model}.json` |
 | `analysis/charts/` | Interactive HTML dashboards (if visualization succeeded) |
 
